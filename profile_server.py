@@ -6,11 +6,13 @@ from collections import OrderedDict
 from contextlib import closing
 import datetime as dt
 import errno
+import hashlib
 import io
 import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -136,7 +138,21 @@ def sync(args, full=True):
 
         profile = {key: download(args.profile, key, read_page, None if full else previous.get(key))
                    for key in SECTIONS}
-    if all(profile[key] == previous.get(key) for key in SECTIONS):
+    if sys.version_info >= (3, 6) and os.path.isfile(os.path.join(ROOT, "recommendations.py")):
+        import recommendations
+        inputs = [[r["kp"], r.get("vote"), r.get("kpAudience"), r.get("original"), r["title"], r.get("year")]
+                  for r in profile["history"]] + [r["kp"] for r in profile["watchlist"]]
+        revision = str(recommendations.MODEL_VERSION) + ":" + hashlib.sha256(json.dumps(inputs).encode("utf-8")).hexdigest()
+        profile["contrarian"] = previous.get("contrarian", [])
+        profile["modelRevision"] = previous.get("modelRevision", "")
+        if revision != profile["modelRevision"]:
+            try:
+                picks = recommendations.recommend(profile)
+                profile["contrarian"] = recommendations.localize(picks, profile, profile["contrarian"])
+                profile["modelRevision"] = revision
+            except Exception as exc:
+                print("MovieLens:", type(exc).__name__, str(exc), file=sys.stderr)
+    if all(value == previous.get(key) for key, value in profile.items()):
         return False
     profile.update(profile=args.profile, updated=dt.datetime.utcnow().isoformat() + "Z")
     data = json.dumps(profile, ensure_ascii=False, separators=(",", ":")).encode("utf-8")

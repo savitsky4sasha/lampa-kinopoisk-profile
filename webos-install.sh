@@ -15,7 +15,8 @@ mkdir -p "$dest/data"
 chmod 755 "$dest"
 chown nobody "$dest/data"
 chmod 700 "$dest/data"
-for name in profile.js profile_server.py; do
+for name in profile.js profile_server.py recommendations.py; do
+    if [ "$name" = recommendations.py ] && [ ! -f "$here/$name" ]; then continue; fi
     cp "$here/$name" "$dest/$name.new"
     chmod 644 "$dest/$name.new"
     mv "$dest/$name.new" "$dest/$name"
