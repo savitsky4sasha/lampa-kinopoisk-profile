@@ -9,12 +9,15 @@
     var script = document.currentScript;
     var origin = script && /^http:\/\/(?:192\.168\.|10\.|127\.|localhost[:/])/.test(script.src)
         ? new URL(script.src).origin : '';
+    var cloud = !localServer && !origin;
+    var cloudFeed = 'https://raw.githubusercontent.com/savitsky4sasha/lampa-kinopoisk-profile/main/feed';
     var loadedAt = 0, pending, generation = 0, snapshot, discovery, discoveryKey;
     var version = '', homeVersion = null, scoreView, lastInput = 0;
     var pollMs = 60000;
     var tmdb = app.Api.sources.tmdb;
 
     function endpoint() {
+        if (cloud) return cloudFeed;
         if (localServer === 'http://127.0.0.1:8766') return localServer;
         return String(app.Storage.get('kp_profile_server', '') || localServer || origin || 'http://127.0.0.1:8766').trim().replace(/\/+$/, '');
     }
@@ -40,6 +43,7 @@
             $.ajax({url: url + '/profile.json' + query, dataType: 'json', timeout: 7000})
                 .done(function (p, status, xhr) {
                     if (current !== generation || !valid(p)) return;
+                    if (cloud && snapshot && p.updated === snapshot.updated) return;
                     version = xhr.getResponseHeader('X-Profile-Version') || '';
                     snapshot = p;
                     try { app.Storage.set('kp_profile_snapshot', {url: url, data: p, version: version}); } catch (e) { /* memory cache */ }
@@ -236,6 +240,7 @@
     window.setInterval(refreshVisible, pollMs);
     document.addEventListener('visibilitychange', refreshVisible);
     app.SettingsApi.addComponent({component: source, name: 'Мой Кинопоиск', icon: '<span>КП</span>'});
+    if (cloud) return;
     app.SettingsApi.addParam({component: source,
         param: {name: 'kp_profile_server', type: 'input', default: localServer || origin},
         field: {name: 'Адрес сервера профиля', description: 'HTTP-адрес компьютера с profile_server.py'},
