@@ -140,6 +140,7 @@ def sync(args, full=True):
                    for key in SECTIONS}
     if sys.version_info >= (3, 6) and os.path.isfile(os.path.join(ROOT, "recommendations.py")):
         import recommendations
+        profile["imdbByKp"] = recommendations.missing_kp_scores(profile, previous.get("imdbByKp", {}), full)
         inputs = [[r["kp"], r.get("vote"), r.get("kpAudience"), r.get("original"), r["title"], r.get("year")]
                   for r in profile["history"]] + [r["kp"] for r in profile["watchlist"]]
         revision = str(recommendations.MODEL_VERSION) + ":" + hashlib.sha256(json.dumps(inputs).encode("utf-8")).hexdigest()

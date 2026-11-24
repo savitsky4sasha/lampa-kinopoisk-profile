@@ -685,12 +685,16 @@
     function imdbId(movie) {
         var existing = movie.imdb_id || (movie.external_ids && movie.external_ids.imdb_id);
         if (/^tt\d+$/.test(existing || '')) return Promise.resolve(existing);
-        if (!tmdb.external_imdb_id) return Promise.resolve('');
+        if (!tmdb.external_imdb_id && !tmdb.get) return Promise.resolve('');
         var resolved = movie.source === source && movie.kpEntry ? resolveMovie(movie.kpEntry) : Promise.resolve(movie);
         return resolved.then(function (m) {
             if (!m || !Number(m.id)) return '';
             return new Promise(function (done) {
-                tmdb.external_imdb_id({type: m.name || m.original_name ? 'tv' : 'movie', id: m.id}, done);
+                var type = m.name || m.original_name ? 'tv' : 'movie';
+                if (tmdb.external_imdb_id) tmdb.external_imdb_id({type: type, id: m.id}, done);
+                else tmdb.get(type + '/' + m.id + '/external_ids', {}, function (data) {
+                    done(data && data.imdb_id || '');
+                }, function () { done(''); });
             });
         });
     }
@@ -760,7 +764,9 @@
         var personal = currentVote(movie.kinopoisk_id || (entry && entry.kp), entry);
         var audience = Number(entry && entry.kpAudience) || Number(movie.kp_rating) || Number(movie.ratingKinopoisk);
         var cached = posterRatings[posterKey(movie)];
-        var imdb = Number(movie.imdb_rating) || (cached && cached.value);
+        var kpId = movie.kinopoisk_id || (entry && entry.kp);
+        var imported = snapshot && snapshot.imdbByKp && snapshot.imdbByKp[kpId];
+        var imdb = Number(movie.imdb_rating) || Number(movie.ratingImdb) || Number(imported) || (cached && cached.value);
         var score = personal || audience || imdb;
         var badge = poster.querySelector('.card__vote');
         var hasScore = score > 0 && score <= 10;
@@ -771,12 +777,13 @@
                 badge.className = 'card__vote';
                 poster.appendChild(badge);
             }
+            badge.classList.remove('hide');
             badge.classList.add('kp-home-score');
             var label = (personal || score === 10) ? String(score) : score.toFixed(1);
             if (badge.textContent !== label) badge.textContent = label;
             badge.title = personal ? 'Моя оценка на Кинопоиске' : audience ? 'Рейтинг зрителей Кинопоиска' : 'Рейтинг IMDb';
             badge.classList.toggle('kp-mine', !!personal);
-        } else if ((!cached || cached.until <= Date.now()) && (tmdb.external_imdb_id || movie.imdb_id)) {
+        } else if ((!cached || cached.until <= Date.now()) && (tmdb.external_imdb_id || tmdb.get || movie.imdb_id || (movie.external_ids && movie.external_ids.imdb_id))) {
             if (posterObserver) posterObserver.observe(node);
             else queuePoster(node);
         }
@@ -824,12 +831,13 @@
         if (e.type !== 'start') return;
         var row = e.component === 'category_full' && e.object.source === source &&
             rows.find(function (r) { return r.id === e.object.url || r.title === e.object.title; });
-        if (e.component !== 'main' && e.component !== 'kp_personal_tab' && e.component !== 'recomend' && !row) return;
+        if (e.component !== 'main' && e.component !== 'kp_personal_tab' && e.component !== 'recomend' &&
+            e.component !== 'category' && e.component !== 'category_full') return;
         homePage = {root: root, row: row, tab: e.component === 'kp_personal_tab' || e.object.source === source};
         root.classList.add('kp-home-cards');
         if (window.IntersectionObserver) posterObserver = new window.IntersectionObserver(function (entries) {
             entries.forEach(function (entry) {
-                if (entry.isIntersecting) {
+                if (entry.isIntersecting || entry.intersectionRatio > 0) {
                     posterObserver.unobserve(entry.target);
                     queuePoster(entry.target);
                 }
@@ -866,6 +874,16 @@
         stopPreview();
         var hero = root.querySelector('.full-start-new, .full-start');
         if (!hero) return;
+        var playIcon = hero.querySelector('.button--play > svg');
+        var poster = hero.querySelector('.full-start-new__poster, .full-start__poster');
+        if (poster && playIcon) {
+            var icon = window.getComputedStyle(playIcon);
+            var em = parseFloat(window.getComputedStyle(poster).fontSize);
+            if (em > 0 && parseFloat(icon.width) > 0 && parseFloat(icon.height) > 0) {
+                poster.style.setProperty('--kp-check-width', parseFloat(icon.width) / em + 'em');
+                poster.style.setProperty('--kp-check-height', parseFloat(icon.height) / em + 'em');
+            }
+        }
         var preview = activePreview = {root: root};
         function current() { return activePreview === preview && document.documentElement.contains(root); }
         function showRating(type, value) {
@@ -997,7 +1015,7 @@
             '.kp-preview-layer video{display:block;width:100%;height:100%;object-fit:cover}',
             '.kp-preview-layer:after{content:"";position:absolute;top:0;left:0;width:100%;height:100%;background:linear-gradient(90deg,rgba(14,17,27,.65),transparent 75%),linear-gradient(0deg,rgba(14,17,27,.72),transparent 60%),rgba(0,0,0,.32)}',
             '.card__view>.card__marker--viewed,.full-start-new__poster>.card__marker--viewed,.full-start__poster>.card__marker--viewed,.kp-watched-overlay{position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;box-sizing:border-box;padding:0;border-radius:1em;background:rgba(0,0,0,.42);z-index:1;pointer-events:none}',
-            '.card__marker.card__marker--viewed:before,.kp-watched-overlay:before{content:"";display:block;width:1.8em;height:1.8em;margin:0;border:0;border-radius:0;background:transparent center/contain no-repeat url("data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 28 29%27 fill=%27none%27 stroke=%27white%27 stroke-width=%272.7%27%3E%3Ccircle cx=%2714%27 cy=%2714.5%27 r=%2713%27/%3E%3Cpath d=%27m8 14.5 4 4 8-8%27 stroke-linecap=%27round%27 stroke-linejoin=%27round%27/%3E%3C/svg%3E")}',
+            '.card__marker.card__marker--viewed:before,.kp-watched-overlay:before{content:"";display:block;width:1.95em;height:1.95em;width:var(--kp-check-width,1.95em);height:var(--kp-check-height,1.95em);margin:0;border:0;border-radius:0;background:transparent center/contain no-repeat url("data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 28 29%27 fill=%27none%27 stroke=%27white%27 stroke-width=%272.7%27%3E%3Ccircle cx=%2714%27 cy=%2714.5%27 r=%2713%27/%3E%3Cpath d=%27m8 14.5 4 4 8-8%27 stroke-linecap=%27round%27 stroke-linejoin=%27round%27/%3E%3C/svg%3E")}',
             '.card__marker--viewed>span{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}',
             '.kp-profile-seen>.card__marker--viewed{display:none}.card__view>.card__vote,.card__view>.card__icons{z-index:2}',
             '.kp-home-cards .kp-no-score .card__vote,.kp-profile-seen .card__icon.icon--history{display:none}',

@@ -109,6 +109,32 @@ def recommend(profile, archive=None):
     return [record for _, _, record in sorted(ranked, key=lambda r: (-r[0], r[1]))[:70]]
 
 
+def missing_kp_scores(profile, previous, full):
+    """Cache public IMDb scores for profile entries without a KP score."""
+    from concurrent.futures import ThreadPoolExecutor
+    from xml.etree import ElementTree
+
+    ids = {str(row["kp"]) for rows in (profile["history"], profile["watchlist"])
+           for row in rows if not row.get("vote") and not row.get("kpAudience")}
+    saved = {key: value for key, value in previous.items() if key in ids}
+
+    def lookup(key):
+        try:
+            with urlopen("https://rating.kinopoisk.ru/" + key + ".xml", timeout=6) as reply:
+                value = float(ElementTree.fromstring(reply.read(8192)).findtext("imdb_rating") or 0)
+        except (OSError, ValueError, TypeError, ElementTree.ParseError):
+            return key, previous.get(key)
+        return key, value if 0 < value <= 10 else None
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        for key, value in pool.map(lookup, ids if full else ids - set(previous)):
+            if value:
+                saved[key] = value
+            else:
+                saved.pop(key, None)
+    return saved
+
+
 def localize(records, profile, previous=()):
     """Resolve exact IMDb IDs as a batch; public KP scores are optional."""
     import json
