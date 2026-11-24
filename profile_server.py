@@ -55,6 +55,7 @@ def parse_page(html, section, offset):
         title = movie["title"]
         reactions = next(v for k, v in item.items() if k.startswith("reactions"))
         vote = next((r["value"] for r in reactions if r["__typename"] == "Vote"), None)
+        audience = (movie.get("rating") or {}).get("kinopoisk") or {}
         years = movie.get("releaseYears") or []
         year = movie.get("productionYear") or (years[0].get("start") if years else None)
         img = (movie.get("poster") or {}).get("avatarsUrl", "")
@@ -63,6 +64,7 @@ def parse_page(html, section, offset):
         cards.append(dict(kp=movie["id"], kind="movie" if movie["__typename"] == "Film" else "tv",
                           title=title.get("russian") or title.get("original") or str(movie["id"]),
                           original=title.get("original"), year=year, vote=vote,
+                          kpAudience=audience.get("value") if audience.get("isActive") else None,
                           poster=(img + "/268x402") if img else "",
                           genres=[state[g["__ref"]]["name"] for g in movie.get("genres", [])]))
     return cards, page["total"], page["limit"]

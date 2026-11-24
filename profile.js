@@ -256,7 +256,7 @@
             return p ? row.items(p) : [];
         }).then(function (all) {
             var start = (page - 1) * 20;
-            done({title: row.title + ' (' + all.length + ')', source: source, url: row.id,
+            done({title: row.title, source: source, url: row.id,
                 page: page, total_pages: Math.ceil(all.length / 20),
                 results: all.slice(start, start + 20), more: all.length > 20});
         }).catch(function () { done({results: []}); });
@@ -267,26 +267,27 @@
         content(row, Number(params.page) || 1, done);
     };
     app.Api.sources[source] = catalog;
-    // Lampa uses the same visibility setting for home and categories.
-    // Override that one lookup only while it synchronously assembles the home screen.
-    var collectRows = app.ContentRows.call;
-    if (collectRows) app.ContentRows.call = function (screen) {
-        if (screen !== 'main') return collectRows.apply(this, arguments);
-        var get = app.Storage.get;
-        app.Storage.get = function (key) {
-            if (key === 'content_rows_recomend_watch') return false;
-            return get.apply(this, arguments);
-        };
-        try { return collectRows.apply(this, arguments); }
-        finally { app.Storage.get = get; }
-    };
-
+    var homeCallbacks = [];
     var homeOrder = ['watchlist', 'discover', 'pick', 'history'];
     homeOrder.forEach(function (id, index) {
         var row = rows.find(function (entry) { return entry.id === id; });
+        function load(done) { content(row, 1, done, true); }
+        homeCallbacks.push(load);
         app.ContentRows.add({name: 'kp_profile_' + row.id, title: row.title, screen: 'main', index: index,
-            call: function () { return function (done) { content(row, 1, done, true); }; }});
+            call: function () { return load; }});
     });
+    var collectRows = app.ContentRows.call;
+    if (collectRows) app.ContentRows.call = function (screen, params, calls) {
+        var result = collectRows.apply(this, arguments);
+        if (screen === 'main') {
+            // Move only enabled profile rows. Keep the relative order of all other rows.
+            homeCallbacks.slice().reverse().forEach(function (callback) {
+                var index = calls.indexOf(callback);
+                if (index >= 0) calls.unshift(calls.splice(index, 1)[0]);
+            });
+        }
+        return result;
+    };
 
     catalog.main = function (params, done, empty) {
         var parts = rows.map(function (row) {
@@ -299,8 +300,13 @@
 
     function addProfileMenu() {
         if ($('.kp-personal-menu').length) return;
+        var component = 'main';
+        if (app.Component && app.Component.get('main')) {
+            component = 'kp_personal_tab';
+            app.Component.add(component, app.Component.get('main'));
+        }
         function openTab() {
-            app.Activity.push({title: 'Кинопоиск', component: 'main', source: source, page: 1});
+            app.Activity.push({title: 'Кинопоиск', component: component, source: source, page: 1});
         }
         if (app.Menu && app.Menu.addButton) {
             app.Menu.addButton(kpIcon, 'Кинопоиск', openTab).addClass('kp-personal-menu');
@@ -310,8 +316,19 @@
             button.on('hover:enter', openTab).appendTo($('.menu .menu__list').first());
         }
     }
-    if (window.appready) addProfileMenu();
-    else app.Listener.follow('app', function (e) { if (e.type === 'ready') addProfileMenu(); });
+    function hideOldMenu() {
+        $('.menu .menu__item:not(.kp-personal-menu)').each(function () {
+            var item = $(this);
+            if (item.find('.menu__text').text().trim() === 'Кинопоиск' &&
+                item.find('svg[viewBox="0 0 239 239"]').length) item.hide();
+        });
+    }
+    function installProfileMenu() {
+        addProfileMenu();
+        if (window.setTimeout) window.setTimeout(hideOldMenu, 0);
+    }
+    if (window.appready) installProfileMenu();
+    else app.Listener.follow('app', function (e) { if (e.type === 'ready') installProfileMenu(); });
 
     function movieEntry(movie, p) {
         if (!p) return null;
@@ -352,6 +369,7 @@
         }, function () {
             authLoaded = true;
             openSettings();
+            hideOldMenu();
         });
     }
 
@@ -373,7 +391,8 @@
     }
 
     function kpCall(method, id, token, rating) {
-        var data = {method: method, movie: id, oauth: token};
+        var data = {method: method, movie: id};
+        if (token) data.oauth = token;
         if (rating) data.rate = rating;
         return new Promise(function (ok, fail) {
             $.ajax({url: accessGateway, data: data, dataType: 'json', timeout: 20000,
@@ -439,25 +458,39 @@
         menu('Моя оценка на КП', choices, function (item) { vote(movie, id, item.value, token); });
     }
 
+    var trailersCache = {};
+    function trailers(id) {
+        var cached = trailersCache[id];
+        if (cached && Date.now() - cached.time < 180000) return cached.promise;
+        var promise = kpCall('getTrailers', id).then(function (result) {
+            var items = result.trailers && result.trailers.items || [];
+            return items.map(function (item) {
+                var url = String(item.streamUrl || '').replace(/^\/\//, 'https://');
+                return {title: item.title || 'Трейлер', url: url};
+            }).filter(function (clip) { return /^https?:\/\//i.test(clip.url); });
+        }).catch(function (err) { delete trailersCache[id]; throw err; });
+        trailersCache[id] = {time: Date.now(), promise: promise};
+        return promise;
+    }
+
     function extras(id, type, token) {
-        var facts = type === 'trivias';
-        kpCall(facts ? 'getTrivias' : 'getTrailers', id, token).then(function (result) {
-            var items = result[type] && result[type].items || [];
-            if (facts) {
-                var body = $('<div class="about"></div>');
-                items.forEach(function (f) {
-                    if (f.text) $('<p></p>').text(String(f.text).replace(/<[^>]*>/g, '')).appendTo(body);
-                });
-                if (!body.children().length) return app.Noty.show('На КП пока нет фактов');
-                var ctrl = app.Controller.enabled();
-                app.Modal.open({title: 'Факты Кинопоиска', html: body, size: 'large',
-                    onBack: function () { app.Modal.close(); app.Controller.toggle(ctrl && ctrl.name || 'full_start'); }});
-            } else {
-                var clips = items.filter(function (t) { return /^https?:\/\//i.test(t.streamUrl || ''); })
-                    .map(function (t) { return {title: t.title || 'Трейлер', url: t.streamUrl}; });
+        if (type === 'trailers') {
+            trailers(id).then(function (clips) {
                 if (!clips.length) return app.Noty.show('На КП пока нет доступных трейлеров');
                 menu('Трейлеры Кинопоиска', clips, function (clip) { app.Player.play(clip); });
-            }
+            }).catch(function () { app.Noty.show('Не удалось загрузить трейлеры КП'); });
+            return;
+        }
+        kpCall('getTrivias', id, token).then(function (result) {
+            var items = result.trivias && result.trivias.items || [];
+            var body = $('<div class="about"></div>');
+            items.forEach(function (f) {
+                if (f.text) $('<p></p>').text(String(f.text).replace(/<[^>]*>/g, '')).appendTo(body);
+            });
+            if (!body.children().length) return app.Noty.show('На КП пока нет фактов');
+            var ctrl = app.Controller.enabled();
+            app.Modal.open({title: 'Факты Кинопоиска', html: body, size: 'large',
+                onBack: function () { app.Modal.close(); app.Controller.toggle(ctrl && ctrl.name || 'full_start'); }});
         }).catch(function (err) { app.Noty.show(err.message); });
     }
 
@@ -469,6 +502,7 @@
             {title: 'Открыть на сайте КП', key: 'site'}
         ], function (item) {
             if (item.key === 'site') { goToKP(base); return; }
+            if (item.key === 'trailers') return extras(id, 'trailers');
             withAccess(function (token) {
                 if (item.key === 'vote') chooseVote(movie, id, entry, token);
                 else extras(id, item.key, token);
@@ -477,12 +511,13 @@
     }
 
     var resolvedIds = {};
-    function identifyMovie(movie, onId) {
+    function identifyMovie(movie, onId, silent) {
         var tv = Boolean(movie.name || movie.original_name);
         var key = (tv ? 'tv/' : 'movie/') + movie.id;
         if (resolvedIds[key]) return onId(resolvedIds[key]);
         function remember(id) { resolvedIds[key] = id; onId(id); }
         function choose() {
+            if (silent) return onId(null);
             menu('Совпадение с КП не найдено', [
                 {title: 'Найти фильм на сайте КП', search: true},
                 {title: 'Указать ссылку или ID фильма'}
@@ -500,7 +535,7 @@
         if (!/^\d+$/.test(String(movie.id))) return choose();
         var query = 'SELECT DISTINCT ?kp WHERE { ?work wdt:' + (tv ? 'P4983' : 'P4947') +
             ' "' + movie.id + '"; wdt:P2603 ?kp. } LIMIT 2';
-        app.Noty.show('Ищу фильм по ID TMDB…');
+        if (!silent) app.Noty.show('Ищу фильм по ID TMDB…');
         $.ajax({url: 'https://query.wikidata.org/sparql', data: {query: query, format: 'json'},
             dataType: 'json', timeout: 6500}).done(function (r) {
                 var ids = r && r.results && r.results.bindings || [];
@@ -516,23 +551,159 @@
         var buttons = holder.find('.full-start-new__buttons, .full-start__buttons').first();
         if (!buttons.length || buttons.find('.kp-personal-actions').length) return;
         var button = $('<div class="full-start__button selector kp-personal-actions">' + kpIcon + '<span>Кинопоиск</span></div>');
-        button.on('hover:enter', function () {
+        function withId(action) {
             var entry = movieEntry(movie, snapshot);
             var id = movie.kinopoisk_id || (entry && entry.kp);
             function openActions(kpId) {
                 if (!$.contains(document, buttons[0])) return;
                 movie.kinopoisk_id = kpId;
                 var base = 'https://www.kinopoisk.ru/' + (movie.name || movie.original_name ? 'series/' : 'film/') + kpId + '/';
-                showMovieActions(movie, entry, kpId, base);
+                action(kpId, entry, base);
             }
             if (id && /^\d+$/.test(String(id))) openActions(id);
             else identifyMovie(movie, openActions);
+        }
+        button.on('hover:enter', function () {
+            withId(function (id, entry, base) { showMovieActions(movie, entry, id, base); });
         }).appendTo(buttons);
+        $('<div class="full-start__button selector kp-trailer-button"><svg><use xlink:href="#sprite-play"></use></svg><span>Трейлеры КП</span></div>')
+            .on('hover:enter', function () {
+                withId(function (id) { extras(id, 'trailers'); });
+            }).appendTo(buttons);
     }
+
+    var activePreview = null;
+    function stopPreview() {
+        if (!activePreview) return;
+        var preview = activePreview;
+        activePreview = null;
+        window.clearTimeout(preview.timer);
+        if (preview.hls) preview.hls.destroy();
+        if (preview.video) {
+            preview.video.onplaying = preview.video.onerror = preview.video.onended = null;
+            preview.video.pause();
+            preview.video.removeAttribute('src');
+            preview.video.load();
+            preview.layer.remove();
+        }
+    }
+    function cardPresentation(movie, root) {
+        stopPreview();
+        var hero = root.querySelector('.full-start-new, .full-start');
+        if (!hero) return;
+        var preview = activePreview = {root: root};
+        function current() { return activePreview === preview && document.documentElement.contains(root); }
+        function showRating(type, value) {
+            var number = parseFloat(value);
+            var field = root.querySelector('.rate--' + type);
+            if (!field || !field.firstElementChild || !(number > 0 && number <= 10)) return;
+            field.firstElementChild.textContent = number.toFixed(1);
+            field.classList.remove('hide');
+        }
+        var kind = movie.name || movie.original_name ? 'tv' : 'movie';
+        function loadImdb(id) {
+            if (!/^tt\d+$/.test(id || '')) return;
+            $.ajax({url: 'https://v3-cinemeta.strem.io/meta/' + (kind === 'tv' ? 'series' : 'movie') + '/' + id + '.json',
+                dataType: 'json', timeout: 6500}).done(function (data) {
+                if (data.meta && data.meta.id === id) showRating('imdb', data.meta.imdbRating);
+            });
+        }
+        if (Number(movie.imdb_rating) > 0) showRating('imdb', movie.imdb_rating);
+        else if (movie.imdb_id || (movie.external_ids && movie.external_ids.imdb_id))
+            loadImdb(movie.imdb_id || movie.external_ids.imdb_id);
+        else if (tmdb.external_imdb_id) tmdb.external_imdb_id({type: kind, id: movie.id}, loadImdb);
+
+        function playBackground(url) {
+            if (!current() || document.hidden || (app.Player.opened && app.Player.opened())) return;
+            var layer = preview.layer = document.createElement('div');
+            layer.className = 'kp-preview-layer';
+            var video = preview.video = document.createElement('video');
+            video.muted = video.defaultMuted = true;
+            video.playsInline = true;
+            video.setAttribute('playsinline', '');
+            video.setAttribute('muted', '');
+            layer.setAttribute('aria-hidden', 'true');
+            layer.appendChild(video);
+            hero.classList.add('kp-preview-hero');
+            hero.insertBefore(layer, hero.firstChild);
+            function stop() { if (activePreview === preview) stopPreview(); }
+            video.onended = video.onerror = stop;
+            video.onplaying = function () {
+                if (!current()) return stop();
+                window.clearTimeout(preview.timer);
+                layer.classList.add('is-playing');
+            };
+            function play() {
+                var started = video.play();
+                if (started && started.catch) started.catch(stop);
+            }
+            preview.timer = window.setTimeout(stop, 16000);
+            if (/\.m3u8(?:\?|$)/i.test(url) && !video.canPlayType('application/vnd.apple.mpegurl')) {
+                if (!window.Hls || !window.Hls.isSupported()) return stop();
+                var hls = preview.hls = new window.Hls();
+                hls.on(window.Hls.Events.MANIFEST_PARSED, play);
+                hls.on(window.Hls.Events.ERROR, function (_, e) { if (e.fatal) stop(); });
+                hls.loadSource(url);
+                hls.attachMedia(video);
+            } else { video.src = url; play(); }
+        }
+        profile().then(function (p) {
+            if (!current()) return;
+            var entry = movieEntry(movie, p);
+            var audience = Number(movie.kp_rating) || (entry && entry.kpAudience);
+            showRating('kp', audience);
+            function useId(id) {
+                if (!id || !current()) return;
+                resolvedIds[kind + '/' + movie.id] = id;
+                if (!audience && app.Reguest) {
+                    var request = new app.Reguest();
+                    request.timeout(4500);
+                    request.native('https://rating.kinopoisk.ru/' + id + '.xml', function (xml) {
+                        var data = typeof xml === 'string' ? new DOMParser().parseFromString(xml, 'text/xml') : xml;
+                        if (!data || !data.querySelector) return;
+                        ['kp', 'imdb'].forEach(function (name) {
+                            var node = data.querySelector(name + '_rating');
+                            if (node) showRating(name, node.textContent);
+                        });
+                    }, function () {}, false, {dataType: 'text'});
+                }
+                if (String(app.Storage.get('kp_personal_backdrop', true)) !== 'true' || document.hidden ||
+                    (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches)) return;
+                preview.timer = window.setTimeout(function () {
+                    if (!current()) return;
+                    trailers(id).then(function (clips) { if (clips.length) playBackground(clips[0].url); }).catch(function () {});
+                }, 950);
+            }
+            var id = movie.kinopoisk_id || (entry && entry.kp);
+            if (id) useId(id); else identifyMovie(movie, useId, true);
+        });
+    }
+
+    if (document.head) {
+        var style = document.createElement('style');
+        style.textContent = '.kp-personal-reaction-line{display:flex;align-items:center;flex-wrap:wrap;gap:.75em;margin-bottom:1em}' +
+            '.kp-personal-reaction-line .full-start-new__reactions,.kp-personal-reaction-line .full-start__reactions{margin-bottom:0}' +
+            '.kp-personal-score{display:inline-flex;align-items:center;white-space:nowrap;border-radius:2em;padding:.48em .85em;line-height:1.2;color:white;font-weight:600}' +
+            '.kp-personal-score.focus{box-shadow:0 0 0 .16em currentColor}' +
+            '.kp-preview-hero{position:relative;isolation:isolate}.kp-preview-layer{position:absolute;inset:0;z-index:-1;overflow:hidden;pointer-events:none;opacity:0;transition:opacity .65s ease}' +
+            '.kp-preview-layer.is-playing{opacity:.78}.kp-preview-layer video{width:100%;height:100%;object-fit:cover}' +
+            '.kp-preview-layer:after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,rgba(14,17,27,.86),rgba(22,28,42,.28) 65%),linear-gradient(0deg,rgba(14,17,27,.96),transparent 50%)}';
+        document.head.appendChild(style);
+    }
+    app.Listener.follow('activity', function (e) {
+        if (!activePreview || (e.type !== 'archive' && e.type !== 'destroy')) return;
+        var node = e.object && e.object.activity && e.object.activity.render()[0];
+        if (!node || node === activePreview.root || node.contains(activePreview.root)) stopPreview();
+    });
+    document.addEventListener('visibilitychange', function () { if (document.hidden) stopPreview(); });
+    if (app.Player && app.Player.listener) app.Player.listener.follow('create', stopPreview);
 
     app.Listener.follow('full', function (e) {
         if (e.type !== 'complite' || !e.data || !e.data.movie) return;
         actionsButton(e);
+        var holder = e.object && e.object.activity && e.object.activity.render();
+        var cardRoot = holder && holder[0];
+        if (cardRoot && cardRoot.querySelector) cardPresentation(e.data.movie, cardRoot);
         var selected = e.object && (e.object.card || (e.object.params && e.object.params.card));
         if (selected && selected.kpReason && e.object.activity) {
             var heading = e.object.activity.render().find('.full-start-new__title, .full-start__title').first();
@@ -547,15 +718,32 @@
                 if (scoreView === draw) scoreView = null;
                 return;
             }
-            if (!p && !confirmed[movie.kinopoisk_id]) return;
             if (p && draw.revision === p.updated) return;
             draw.revision = p && p.updated;
             var k = movieEntry(movie, p);
             var watched = k && p.history.indexOf(k) >= 0;
             var value = currentVote(movie.kinopoisk_id || (k && k.kp), k);
-            block.find('.kp-personal-score').remove();
-            if (value || watched) $('<span class="kp-personal-score"></span>').css({fontSize: '0.85em', marginLeft: '0.6em'})
-                .text(value ? 'Моя оценка КП: ' + value + '/10' : 'Просмотрено на КП').appendTo(block);
+            var surface = holder || block;
+            surface.find('.kp-personal-score').remove();
+            var badge = $('<span class="kp-personal-score selector"></span>').text(value ? 'КП ' + value : 'Оценить на КП');
+            badge.css({backgroundColor: value ? (value >= 7 ? '#278543' : value >= 5 ? '#65666b' : '#bb4146') : 'rgba(35,36,42,.84)'});
+            badge.on('hover:enter', function () {
+                function rate(id) {
+                    movie.kinopoisk_id = id;
+                    withAccess(function (token) { chooseVote(movie, id, k, token); });
+                }
+                var id = movie.kinopoisk_id || (k && k.kp);
+                if (id) rate(id); else identifyMovie(movie, rate);
+            });
+            var reactions = cardRoot && cardRoot.querySelector && cardRoot.querySelector('.full-start-new__reactions, .full-start__reactions');
+            if (reactions) {
+                if (!reactions.parentNode.classList.contains('kp-personal-reaction-line'))
+                    $(reactions).wrap('<div class="kp-personal-reaction-line"></div>');
+                badge.attr('title', value ? 'Моя оценка на Кинопоиске' : watched ? 'Просмотрено на КП · поставить оценку' : 'Поставить оценку на Кинопоиске').insertBefore(reactions);
+            } else badge.appendTo(block);
+            if (app.Controller && app.Controller.collectionAppend && app.Controller.enabled().name === 'full_start')
+                app.Controller.collectionAppend(badge);
+
         };
         scoreView = draw;
         profile().then(draw);
@@ -662,7 +850,7 @@
             if (homeVersion === null || homeVersion === p.updated || Date.now() - lastInput < 10000) return;
             var active = app.Activity.active();
             var controller = app.Controller.enabled();
-            if (active && active.component === 'main' && controller && controller.name === 'content') {
+            if (active && (active.component === 'main' || active.component === 'kp_personal_tab') && controller && controller.name === 'content') {
                 homeVersion = p.updated;
                 app.Activity.replace();
             }
@@ -679,6 +867,9 @@
     }, true);
     if (window.appready) profile().then(importViewed);
     else app.Listener.follow('app', function (e) { if (e.type === 'ready') profile().then(importViewed); });
+    setting('kp_personal_backdrop', 'Трейлер КП на фоне', 'Запускать трейлер без звука поверх фона карточки.', function () {
+        if (String(app.Storage.get('kp_personal_backdrop', true)) !== 'true') stopPreview();
+    }, true);
     setting('kp_personal_future', 'Будущие релизы в «Позже»', 'Добавлять из «Буду смотреть» фильмы и сериалы с предстоящей датой выхода в TMDB.', function () {
         if (enabled('kp_personal_future')) profile().then(importFuture);
     });
