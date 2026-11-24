@@ -1,21 +1,41 @@
-"""Read public Kinopoisk list pages and serve a private snapshot to Lampa."""
+# -*- coding: utf-8 -*-
+"""Read public Kinopoisk pages on a computer or directly on a webOS television."""
+from __future__ import print_function
 import argparse
+from collections import OrderedDict
+from contextlib import closing
 import datetime as dt
-import http.cookiejar
+import errno
+import io
 import json
 import os
-from pathlib import Path
 import re
+import subprocess
 import tempfile
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.error import HTTPError
-from urllib.parse import parse_qs, urlsplit
-from urllib.request import HTTPCookieProcessor, Request, build_opener
+
+try:
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from socketserver import ThreadingMixIn
+    from urllib.parse import parse_qs, urlsplit
+    from urllib.request import HTTPCookieProcessor, Request, build_opener
+    from urllib.error import HTTPError
+    from http.cookiejar import CookieJar
+except ImportError:  # Python 2.7 on older webOS televisions
+    from BaseHTTPServer import BaseHTTPRequestHandler, HTTPServer
+    from SocketServer import ThreadingMixIn
+    from urlparse import parse_qs, urlsplit
+    from urllib2 import HTTPCookieProcessor, Request, build_opener, HTTPError
+    from cookielib import CookieJar
+
+
+class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+
 
 SECTIONS = {"watchlist": "planned-to-watch", "history": "voted-watched"}
-ROOT = Path(__file__).resolve().parent
+ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
 def parse_page(html, section, offset):
@@ -49,20 +69,19 @@ def parse_page(html, section, offset):
 
 
 def download(alias, section, opener, previous=None):
-    records = {}
+    records = OrderedDict()
     page_number = 1
     while True:
-        url = f"https://www.kinopoisk.ru/user/{alias}/movies/{SECTIONS[section]}/?page={page_number}"
+        url = "https://www.kinopoisk.ru/user/{}/movies/{}/?page={}".format(alias, SECTIONS[section], page_number)
         for attempt in range(3):
             try:
-                with opener.open(Request(url), timeout=20) as reply:
-                    html = reply.read().decode("utf-8")
+                html = opener(url)
                 cards, total, limit = parse_page(html, section, len(records))
                 break
             except HTTPError as exc:
                 if exc.code < 500 or attempt == 2:
                     raise
-            except (OSError, ValueError, StopIteration, KeyError):
+            except (IOError, OSError, ValueError, StopIteration, KeyError, subprocess.CalledProcessError):
                 if attempt == 2:
                     raise
             time.sleep(2 ** attempt)
@@ -79,7 +98,7 @@ def download(alias, section, opener, previous=None):
                 raise ValueError("Страница содержит повтор. Предыдущая копия сохранена.")
             records[card["kp"]] = card
         if len(records) == expected:
-            print(section, len(records), flush=True)
+            print(section, len(records))
             return list(records.values())
         if not cards:
             raise ValueError("КП вернул неполную страницу.")
@@ -89,41 +108,63 @@ def download(alias, section, opener, previous=None):
 
 def sync(args, full=True):
     try:
-        previous = json.loads(args.cache.read_bytes())
-    except (FileNotFoundError, ValueError):
+        with open(args.cache, "rb") as cached:
+            previous = json.load(cached)
+    except IOError as exc:
+        if exc.errno != errno.ENOENT:
+            raise
+        previous = {}
+    except ValueError:
         previous = {}
     if previous.get("profile") != args.profile:
         previous = {}
-    opener = build_opener(HTTPCookieProcessor(http.cookiejar.CookieJar()))
-    profile = {key: download(args.profile, key, opener, None if full else previous.get(key))
-               for key in SECTIONS}
+
+    session = build_opener(HTTPCookieProcessor(CookieJar()))
+    with tempfile.NamedTemporaryFile() as guest_cookies:
+        def read_page(url):
+            if args.curl:
+                # Use the television's TLS stack and an ephemeral public guest session.
+                cmd = ["curl", "--fail", "--silent", "--show-error", "--location",
+                       "--proto", "=https", "--proto-redir", "=https", "--max-redirs", "8",
+                       "--connect-timeout", "8", "--max-time", "25",
+                       "-b", guest_cookies.name, "-c", guest_cookies.name, url]
+                return subprocess.check_output(cmd).decode("utf-8")
+            with closing(session.open(Request(url), timeout=20)) as reply:
+                return reply.read().decode("utf-8")
+
+        profile = {key: download(args.profile, key, read_page, None if full else previous.get(key))
+                   for key in SECTIONS}
     if all(profile[key] == previous.get(key) for key in SECTIONS):
         return False
-    profile.update(profile=args.profile, updated=dt.datetime.now(dt.timezone.utc).isoformat())
-    data = json.dumps(profile, ensure_ascii=False, separators=(",", ":")).encode()
-    args.cache.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(dir=args.cache.parent, delete=False) as temp:
+    profile.update(profile=args.profile, updated=dt.datetime.utcnow().isoformat() + "Z")
+    data = json.dumps(profile, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    directory = os.path.dirname(os.path.abspath(args.cache))
+    if not os.path.isdir(directory):
+        os.makedirs(directory)
+    with tempfile.NamedTemporaryFile(dir=directory, delete=False) as temp:
         try:
             temp.write(data)
             temp.close()
-            os.replace(temp.name, args.cache)
+            os.rename(temp.name, args.cache)
         finally:
-            Path(temp.name).unlink(missing_ok=True)
+            if os.path.exists(temp.name):
+                os.unlink(temp.name)
     return True
 
 
 def refresh_loop(args):
+    clock = getattr(time, "monotonic", time.time)
     last_full = None
     while True:
-        full = last_full is None or time.monotonic() - last_full >= 6 * 3600
+        full = last_full is None or clock() - last_full >= 6 * 3600
         try:
             changed = sync(args, full=full)
             if full:
-                last_full = time.monotonic()
-            print(dt.datetime.now().isoformat(timespec="seconds"),
-                  "Списки обновлены" if changed else "Списки проверены, изменений нет", flush=True)
+                last_full = clock()
+            print(dt.datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                  "Списки обновлены" if changed else "Списки проверены, изменений нет")
         except Exception as exc:
-            print("Ошибка обновления:", type(exc).__name__, str(exc), flush=True)
+            print("Ошибка обновления:", type(exc).__name__, str(exc))
         time.sleep(args.interval * 60)
 
 
@@ -133,16 +174,27 @@ def main():
     parser.add_argument("--bind", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8766)
     parser.add_argument("--tv", help="IP телевизора с доступом к личным спискам")
-    parser.add_argument("--cache", type=Path)
+    parser.add_argument("--cache")
+    parser.add_argument("--curl", action="store_true", help="Use system curl to fetch Kinopoisk")
+    parser.add_argument("--run-as", help="Switch to this local system account before serving")
     parser.add_argument("--sync-only", action="store_true")
     parser.add_argument("--interval", type=int, default=5, metavar="MINUTES",
                         help="Минут между проверками профиля (по умолчанию 5)")
     args = parser.parse_args()
     if args.interval < 1:
         parser.error("--interval должен быть не меньше одной минуты")
-    if not re.fullmatch(r"[a-zA-Z0-9_.-]+", args.profile) or args.profile in (".", ".."):
+    if not re.match(r"^[a-zA-Z0-9_.-]+\Z", args.profile) or args.profile in (".", ".."):
         parser.error("Некорректный ID профиля")
-    args.cache = args.cache or Path("cache") / (args.profile + ".json")
+    args.cache = args.cache or os.path.join("cache", args.profile + ".json")
+    if args.run_as:
+        import pwd
+        user = pwd.getpwnam(args.run_as)
+        if os.getuid() == 0:
+            os.setgroups([])
+            os.setgid(user.pw_gid)
+            os.setuid(user.pw_uid)
+        elif os.getuid() != user.pw_uid:
+            parser.error("Cannot switch to the requested local user")
     if args.sync_only:
         sync(args)
         return
@@ -152,15 +204,17 @@ def main():
             if self.client_address[0] not in {args.bind, args.tv, "127.0.0.1"}:
                 return self.send_error(403)
             if path == "/kp.js":
-                code = (ROOT / "profile.js").read_text(encoding="utf-8")
-                origin = json.dumps(f"http://{args.bind}:{args.port}")
-                data = code.replace("var localServer = '';", f"var localServer = {origin};").encode()
+                with io.open(os.path.join(ROOT, "profile.js"), encoding="utf-8") as script:
+                    code = script.read()
+                origin = json.dumps("http://{}:{}".format(args.bind, args.port))
+                data = code.replace("var localServer = '';", "var localServer = " + origin + ";").encode("utf-8")
                 mime = "application/javascript"
             elif path == "/profile.json":
-                if not args.cache.exists():
+                if not os.path.isfile(args.cache):
                     return self.send_error(503, "Profile has not finished loading")
-                with args.cache.open("rb") as stream:
-                    version = str(os.fstat(stream.fileno()).st_mtime_ns)
+                with open(args.cache, "rb") as stream:
+                    stat = os.fstat(stream.fileno())
+                    version = "{}-{}".format(stat.st_ino, stat.st_mtime)
                     if parse_qs(urlsplit(self.path).query).get("version") == [version]:
                         self.send_response(204)
                         self.send_header("Cache-Control", "no-store")
@@ -182,9 +236,14 @@ def main():
             self.end_headers()
             self.wfile.write(data)
 
-    with ThreadingHTTPServer((args.bind, args.port), Handler) as server:
-        threading.Thread(target=refresh_loop, args=(args,), daemon=True).start()
+    server = ThreadingHTTPServer((args.bind, args.port), Handler)
+    worker = threading.Thread(target=refresh_loop, args=(args,))
+    worker.daemon = True
+    worker.start()
+    try:
         server.serve_forever()
+    finally:
+        server.server_close()
 
 
 if __name__ == "__main__":

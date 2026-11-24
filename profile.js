@@ -15,7 +15,8 @@
     var tmdb = app.Api.sources.tmdb;
 
     function endpoint() {
-        return String(app.Storage.get('kp_profile_server', '') || localServer || origin).trim().replace(/\/+$/, '');
+        if (localServer === 'http://127.0.0.1:8766') return localServer;
+        return String(app.Storage.get('kp_profile_server', '') || localServer || origin || 'http://127.0.0.1:8766').trim().replace(/\/+$/, '');
     }
 
     function valid(p) {
