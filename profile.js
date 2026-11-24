@@ -865,7 +865,6 @@
         if (preview.video) {
             preview.video.onplaying = preview.video.onerror = preview.video.onended = preview.video.onpause = null;
             preview.root.classList.remove('kp-preview-active');
-            document.body.classList.remove('kp-preview-background-active');
             preview.video.pause();
             preview.video.removeAttribute('src');
             preview.video.load();
@@ -1097,7 +1096,6 @@
                 layer.classList.add('is-playing');
                 hero.classList.add('kp-trailer-playing');
                 root.classList.add('kp-preview-active');
-                document.body.classList.add('kp-preview-background-active');
             };
             function play() {
                 var started = video.play();
@@ -1157,7 +1155,7 @@
         }).join(',');
         style.textContent = [
             '.menu .menu__item[data-action="feed"],.kp-description-row>.items-line__head{display:none}',
-            '.full-start-new{padding-bottom:1.6em}.kp-description-row .full-descr__text{line-height:1.48}',
+            '.full-start-new{padding-bottom:3em}.kp-description-row .full-descr__text{line-height:1.48}',
             '@font-face {font-family: "KP Inter";font-style: normal;font-display: swap;font-weight: 100 900;src: url(https://cdn.jsdelivr.net/npm/@fontsource-variable/inter@5.2.8/files/inter-latin-wght-normal.woff2) format("woff2");unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;}',
             '@font-face {font-family: "KP Inter";font-style: normal;font-display: swap;font-weight: 100 900;src: url(https://cdn.jsdelivr.net/npm/@fontsource-variable/inter@5.2.8/files/inter-cyrillic-wght-normal.woff2) format("woff2");unicode-range: U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116;}',
             'html body,body button,body input,body select,body textarea{font-family:-apple-system,BlinkMacSystemFont,"KP Inter",system-ui,Arial,sans-serif}',
@@ -1201,7 +1199,10 @@
             '.full-start-new__rate-line>.rate--imdb,.full-start__rate-line>.rate--imdb{order:-3}',
             '.full-start-new__rate-line>.rate--tmdb,.full-start__rate-line>.rate--tmdb{order:-2}',
             '.full-start-new__rate-line>.rate--critics,.full-start__rate-line>.rate--critics{order:-1}',
-            '@media(min-width:601px){.kp-preview-active .full-start__background,body.kp-preview-background-active .background{visibility:hidden}.full-start-new.kp-trailer-playing,.full-start.kp-trailer-playing{background:transparent}}',
+            '@media(min-width:601px){.kp-preview-active .full-start__background{visibility:hidden}.full-start-new.kp-trailer-playing,.full-start.kp-trailer-playing{background:transparent}}',
+            '@media(min-width:601px){.kp-layout-cardify .full-start__background{left:0;top:0;height:80vh;object-fit:cover;-webkit-mask-image:linear-gradient(#000 50%,transparent 100%);mask-image:linear-gradient(#000 50%,transparent 100%)}.kp-layout-cardify .full-start__background.loaded:not(.dim){opacity:1}.kp-layout-cardify .full-start-new__body{min-height:80vh;align-items:flex-end}.kp-layout-cardify .full-start-new__body>.full-start-new__left{position:absolute;top:0;right:0;width:2.5em;height:2.5em;margin:0;pointer-events:none}.kp-layout-cardify .full-start-new__left:before,.kp-layout-cardify .full-start-new__poster>img{display:none}.kp-layout-cardify .full-start-new__left>.full-start-new__poster{background:transparent}.kp-layout-cardify .full-start-new__body>.full-start-new__right{align-self:flex-end;width:100%}.kp-layout-cardify .full-start-new__right>.kp-film-meta,.kp-layout-cardify .full-start-new__right>.full-start-new__rate-line{margin-top:0}}',
+            '@media(min-width:901px){.kp-layout-cardify .full-start-new__body>.full-start-new__right{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);column-gap:2em;align-items:end}.kp-layout-cardify .full-start-new__right>*{grid-column:1}.kp-layout-cardify .full-start-new__right>.kp-film-specs{grid-row:1}.kp-layout-cardify .full-start-new__right>.full-start-new__title{grid-row:2}.kp-layout-cardify .full-start-new__right>.full-start-new__tagline{grid-row:3}.kp-layout-cardify .full-start-new__right>.kp-film-meta{grid-row:4}.kp-layout-cardify .full-start-new__right>.full-start-new__buttons{grid-row:5;flex-wrap:wrap}.kp-layout-cardify .full-start-new__right>.full-start-new__rate-line,.kp-layout-cardify .full-start-new__right>.full-start-new__reactions{grid-column:2;justify-content:flex-end;margin:0}.kp-layout-cardify .full-start-new__right>.full-start-new__rate-line{grid-row:4}.kp-layout-cardify .full-start-new__right>.full-start-new__reactions{grid-row:5}}',
+            '@media(max-width:600px){.kp-layout-cardify .full-start-new__body{display:block}.kp-layout-cardify .full-start-new__body>.full-start-new__left{width:auto;margin:0}.kp-layout-cardify .full-start-new__left:before{display:none}.kp-layout-cardify .full-start-new__left>.full-start-new__poster{position:relative;width:100%;height:32vh;padding:0;overflow:hidden}.kp-layout-cardify .full-start-new__poster>img{object-position:50% 28%}.kp-layout-cardify .full-start-new__body>.full-start-new__right{margin:1.2em 0 0;padding:0;background:transparent}}',
             '.kp-preview-layer{position:absolute;z-index:-1;top:0;right:0;bottom:0;width:58%;display:flex;align-items:center;overflow:hidden;pointer-events:none;opacity:0;transition:opacity .45s ease;-webkit-mask-image:linear-gradient(to right,transparent,#000 64%);mask-image:linear-gradient(to right,transparent,#000 64%)}',
             '.kp-preview-frame{position:relative;width:100%;height:auto;max-height:100%;overflow:hidden;-webkit-mask-image:linear-gradient(to bottom,transparent,#000 22%,#000 70%,transparent);mask-image:linear-gradient(to bottom,transparent,#000 22%,#000 70%,transparent)}.kp-preview-frame:before{content:"";display:block;padding-top:42.55%}.kp-preview-layer.is-playing{opacity:1}.kp-preview-layer video{position:absolute;inset:0;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center}',
             '@media(max-width:600px){.kp-preview-layer{display:none}}',
@@ -1416,6 +1417,11 @@
     }, true);
     if (window.appready) profile().then(importViewed);
     else app.Listener.follow('app', function (e) { if (e.type === 'ready') profile().then(importViewed); });
+    function applyCardLayout() {
+        if (document.documentElement) document.documentElement.classList.toggle('kp-layout-cardify', enabled('kp_personal_cardify'));
+    }
+    applyCardLayout();
+    setting('kp_personal_cardify', 'Карточка в стиле Cardify', 'Крупный фон и информация о фильме внизу. На широком экране рейтинги и реакции справа.', applyCardLayout);
     setting('kp_personal_backdrop', 'Трейлер КП на фоне', 'Запускать трейлер без звука поверх фона карточки.', function () {
         if (String(app.Storage.get('kp_personal_backdrop', true)) !== 'true') stopPreview();
     }, true);
