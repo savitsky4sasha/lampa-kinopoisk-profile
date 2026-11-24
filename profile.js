@@ -870,14 +870,44 @@
             preview.layer.remove();
         }
     }
+    function arrangeFilmMetadata(hero, movie) {
+        var head = hero.querySelector('.full-start-new__head');
+        var details = hero.querySelector('.full-start-new__details');
+        if (!head || !details) return;
+
+        var year = head.querySelector('span:first-child');
+        var country = year && year.nextSibling;
+        if (country && country.nodeType === 3)
+            country.nodeValue = country.nodeValue.replace(/^, /, ' • ').replace(/ [|] /g, ', ');
+
+        var parts = Array.prototype.slice.call(details.children).filter(function (item) {
+            return !item.classList.contains('full-start-new__split');
+        });
+        var duration = Number(movie.runtime) > 0 && parts.find(function (item) {
+            return /^\d{1,3}:\d{2}$/.test(item.textContent.trim());
+        });
+        var genres = (movie.genres || []).slice(0, 5).map(function (g) { return g.name; }).filter(Boolean);
+        var genreList = genres.length && parts.find(function (item) {
+            return item.textContent.trim().toLowerCase() === genres.join(' | ').toLowerCase();
+        });
+        function move(item, text) {
+            if (!item) return;
+            var next = item.nextElementSibling, prev = item.previousElementSibling;
+            if (next && next.classList.contains('full-start-new__split')) next.remove();
+            else if (prev && prev.classList.contains('full-start-new__split')) prev.remove();
+            if (head.textContent.trim()) head.appendChild(document.createTextNode(' • '));
+            if (text) item.textContent = text;
+            head.appendChild(item);
+            head.classList.remove('hide');
+        }
+        if (genreList) move(genreList, genreList.textContent.replace(/ [|] /g, ', '));
+        move(duration);
+    }
     function cardPresentation(movie, root) {
         stopPreview();
         var hero = root.querySelector('.full-start-new, .full-start');
         if (!hero) return;
-        var year = hero.querySelector('.full-start-new__head > span:first-child');
-        var country = year && year.nextSibling;
-        if (country && country.nodeType === 3 && /^, /.test(country.nodeValue))
-            country.nodeValue = ' · ' + country.nodeValue.slice(2);
+        arrangeFilmMetadata(hero, movie);
         var playIcon = hero.querySelector('.button--play > svg');
         var poster = hero.querySelector('.full-start-new__poster, .full-start__poster');
         if (poster && playIcon) {
@@ -991,21 +1021,26 @@
 
     if (document.head) {
         var style = document.createElement('style');
+        var detailTags = ['.full-start-new__rate-line', '.full-start__rate-line'].reduce(function (selectors, line) {
+            return selectors.concat(['.full-start__rate', '.full-start__pg', '.full-start__status'].map(function (tag) {
+                return line + '>' + tag;
+            }));
+        }, []);
         style.textContent = [
             '@font-face {font-family: "KP Inter";font-style: normal;font-display: swap;font-weight: 100 900;src: url(https://cdn.jsdelivr.net/npm/@fontsource-variable/inter@5.2.8/files/inter-latin-wght-normal.woff2) format("woff2");unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;}',
             '@font-face {font-family: "KP Inter";font-style: normal;font-display: swap;font-weight: 100 900;src: url(https://cdn.jsdelivr.net/npm/@fontsource-variable/inter@5.2.8/files/inter-cyrillic-wght-normal.woff2) format("woff2");unicode-range: U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116;}',
-            '.full-start-new,.kp-home-cards{font-family:-apple-system,BlinkMacSystemFont,"KP Inter",system-ui,Arial,sans-serif}',
+            'html body,body button,body input,body select,body textarea{font-family:-apple-system,BlinkMacSystemFont,"KP Inter",system-ui,Arial,sans-serif}',
             '.full-start-new .full-start-new__head{font-size:1em;font-weight:500;color:rgba(255,255,255,.72);letter-spacing:.01em}',
             '.full-start-new .full-start-new__head>span{color:inherit}',
             '.full-start-new .full-start-new__title{font-weight:700}',
             '.full-start-new .full-start-new__tagline{font-weight:500}',
             '.full-start-new .full-start-new__rate-line{font-size:1em}',
-            '.full-start-new__rate-line>.full-start__rate,.full-start__rate-line>.full-start__rate,.kp-home-cards .card__vote.kp-home-score,.kp-home-cards .card .card__quality{box-sizing:border-box;min-height:2.36em;min-width:2.36em;padding:.35em .8em;border-radius:5em;background:rgba(0,0,0,.35);color:#fff;font-size:1.1em;font-weight:600;line-height:1.2;font-variant-numeric:tabular-nums;align-items:center;justify-content:center}',
-            '.full-start-new__rate-line>.full-start__rate:not(.hide),.full-start__rate-line>.full-start__rate:not(.hide){display:inline-flex;flex:0 0 auto}',
+            detailTags.join(',') + ',.kp-home-cards .card__vote.kp-home-score,.kp-home-cards .card .card__quality{box-sizing:border-box;min-height:2.36em;min-width:2.36em;padding:.35em .8em;border:0;border-radius:5em;background:rgba(0,0,0,.35);color:#fff;font-size:1.1em;font-weight:600;line-height:1.2;font-variant-numeric:tabular-nums;align-items:center;justify-content:center}',
+            detailTags.map(function (sel) { return sel + ':not(.hide)'; }).join(',') + '{display:inline-flex;flex:0 0 auto}',
             '.kp-home-cards .card__vote.kp-home-score,.kp-home-cards .card .card__quality{display:inline-flex;bottom:.35em;z-index:2}.kp-home-cards .card .card__quality{left:.35em;right:auto}.kp-home-cards .card__vote.kp-home-score{right:.35em;left:auto}',
             '.full-start__rate-line>.full-start__rate>div,.full-start-new__rate-line>.full-start__rate>div{flex:0 0 auto;width:auto;height:auto;background:transparent;padding:0;font:inherit;color:inherit}',
             '.full-start__rate-line>.full-start__rate>div+div,.full-start-new__rate-line>.full-start__rate>div+div{margin-left:.4em}',
-            '.kp-home-cards .card__title{font-weight:600}',
+            '.card__title,.items-line__title,.settings__title,.modal__title,.selectbox__title{font-weight:600;letter-spacing:-.012em}',
             '.full-start-new .full-start-new__right{min-width:0}',
             '.full-start-new .full-start-new__head{line-height:1.3;margin-bottom:.3em}',
             '.full-start-new .full-start-new__title{line-height:1.12;letter-spacing:-.018em;margin-bottom:.16em}',
