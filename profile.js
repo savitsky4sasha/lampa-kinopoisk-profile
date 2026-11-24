@@ -598,6 +598,7 @@
             var field = root.querySelector('.rate--' + type);
             if (!field || !field.firstElementChild || !(number > 0 && number <= 10)) return;
             field.firstElementChild.textContent = number.toFixed(1);
+            if (type === 'kp' && field.children[1]) field.children[1].textContent = 'КП';
             field.classList.remove('hide');
         }
         var kind = movie.name || movie.original_name ? 'tv' : 'movie';
@@ -722,6 +723,25 @@
             draw.revision = p && p.updated;
             var k = movieEntry(movie, p);
             var watched = k && p.history.indexOf(k) >= 0;
+            var publicScore = Number(k && k.kpAudience) || Number(movie.kp_rating);
+            if (publicScore > 0 && publicScore <= 10 && block[0].querySelector) {
+                var field = block[0].querySelector('.rate--kp');
+                if (!field) {
+                    var template = block[0].querySelector('.rate--tmdb');
+                    if (template) {
+                        field = template.cloneNode(true);
+                        field.classList.remove('rate--tmdb');
+                        field.classList.add('rate--kp');
+                        var imdb = block[0].querySelector('.rate--imdb') || template;
+                        imdb.parentNode.insertBefore(field, imdb.nextSibling);
+                    }
+                }
+                if (field && field.children.length >= 2) {
+                    field.children[0].textContent = publicScore.toFixed(1);
+                    field.children[1].textContent = 'КП';
+                    field.classList.remove('hide');
+                }
+            }
             var value = currentVote(movie.kinopoisk_id || (k && k.kp), k);
             var surface = holder || block;
             surface.find('.kp-personal-score').remove();
@@ -883,6 +903,25 @@
     app.SettingsApi.addParam({component: source, param: {type: 'button', name: 'kp_personal_signin'},
         field: {name: 'Аккаунт для оценок', description: 'Вход через модуль and7ey и управление текущей сессией Яндекса.'},
         onChange: function () { withAccess(accountSettings); }});
+    function retireLegacy() {
+        if (!app.Plugins || !app.Plugins.get || !app.Plugins.remove) return;
+        if (Object.keys(app.Storage.get('kinopoisk_my_ratings_postponed', {})).length) {
+            app.Noty.show('В прежнем плагине есть неотправленные оценки. Дождитесь их отправки.');
+            return;
+        }
+        var legacy = app.Plugins.get().filter(function (plugin) {
+            try {
+                var url = new URL(plugin.url, window.location.href);
+                return (url.hostname === 'and7ey.github.io' && /^\/lampa\/kinopoisk(?:_rating)?\.js$/.test(url.pathname)) ||
+                    (url.hostname === 'cdn.jsdelivr.net' && /^\/gh\/and7ey\/lampa(?:@[^/]+)?\/kinopoisk(?:_rating)?\.js$/.test(url.pathname));
+            } catch (err) { return false; }
+        });
+        legacy.forEach(function (plugin) { app.Plugins.remove(plugin); });
+        app.Noty.show(legacy.length ? 'Прежний плагин удалён с устройства. Перезапустите Lampa.' : 'Локальных копий and7ey нет. Установки CUB видны в разделе расширений.');
+    }
+    app.SettingsApi.addParam({component: source, param: {type: 'button', name: 'kp_personal_retire'},
+        field: {name: 'Убрать прежний плагин КП', description: 'Удалить локальные расширения Кинопоиск и Кинопоиск Рейтинги от and7ey.'},
+        onChange: retireLegacy});
     if (cloud) return;
     app.SettingsApi.addParam({component: source,
         param: {name: 'kp_profile_server', type: 'input', default: localServer || origin},
