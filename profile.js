@@ -545,7 +545,9 @@
             var items = result.trailers && result.trailers.items || [];
             return items.map(function (item) {
                 var url = String(item.streamUrl || '').replace(/^\/\//, 'https://');
-                return {title: item.title || 'Трейлер', url: url, hls_type: 'native'};
+                var image = item.preview && (item.preview.fallbackUrl || item.preview.avatarsUrl);
+                if (image && !item.preview.fallbackUrl) image += '/orig';
+                return {title: item.title || 'Трейлер', url: url, hls_type: 'native', preview: image};
             }).filter(function (clip) { return /^https?:\/\//i.test(clip.url); });
         }).catch(function (err) { delete trailersCache[id]; throw err; });
         trailersCache[id] = {time: Date.now(), promise: promise};
@@ -860,6 +862,7 @@
         if (!activePreview) return;
         var preview = activePreview;
         activePreview = null;
+        if (preview.cleanup) { preview.cleanup(); return; }
         window.clearTimeout(preview.timer);
         if (preview.hls) preview.hls.destroy();
         if (preview.video) {
@@ -1017,6 +1020,269 @@
             line.kpRatingObserver.observe(line, {subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['class']});
         }
     }
+    function cardifyLayout(root, hero, movie) {
+        if (hero.classList.contains('kp-cinema')) return;
+        var content = hero.querySelector('.full-start-new__right');
+        if (!content) return;
+        var left = document.createElement('div');
+        var right = document.createElement('div');
+        left.className = 'kp-cinema-info';
+        right.className = 'kp-cinema-social';
+        var reactions = content.querySelector('.full-start-new__reactions');
+        var ratings = content.querySelector('.full-start-new__rate-line');
+        if (reactions) {
+            reactions.classList.add('selector');
+            reactions.tabIndex = 0;
+            right.appendChild(reactions);
+        }
+        if (ratings) right.appendChild(ratings);
+        while (content.firstChild) left.appendChild(content.firstChild);
+        content.appendChild(left);
+        content.appendChild(right);
+        hero.classList.add('kp-cinema');
+        var still = root.querySelector('.full-start__background');
+        if (still) still.classList.add('kp-cinema-background');
+        else {
+            var image = movieBackdrop();
+            if (image) {
+                still = document.createElement('img');
+                still.className = 'full-start__background kp-cinema-background';
+                still.alt = '';
+                still.onload = function () { still.classList.add('loaded'); };
+                root.insertBefore(still, root.firstChild);
+                still.src = image;
+            }
+        }
+        function movieBackdrop() {
+            return movie.backdrop_path && app.Api.img ? app.Api.img(movie.backdrop_path, 'w1280') : movie.background_image;
+        }
+    }
+
+    function startCinemaTrailer(root, hero, movie, movieVideos) {
+        if (!enabled('kp_cardify_trailers') || document.hidden ||
+            (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches)) return;
+        var preview = activePreview = {root: root};
+        var thumb = document.createElement('div');
+        var screen = document.createElement('div');
+        var player = document.createElement('video');
+        var info = document.createElement('div');
+        var name = document.createElement('b');
+        var sound = document.createElement('button');
+        var progress = document.createElement('i');
+        var visible = false, started = false, cancelling = false, delay = 1200;
+        var controller = app.Controller;
+        var youtube = null, youtubeTick;
+        function current() { return activePreview === preview && document.documentElement.contains(hero); }
+        function focused() {
+            var view = app.Activity && app.Activity.active();
+            return current() && !document.hidden && (!view || !view.activity || view.activity.render()[0] === root) &&
+                (!app.Player.opened || !app.Player.opened()) &&
+                (!controller.enabled() || controller.enabled().name === 'full_start');
+        }
+        function clearTimers() {
+            clearTimeout(preview.timer);
+            clearTimeout(preview.reveal);
+            clearTimeout(preview.watchdog);
+        }
+        function leave() {
+            clearTimers();
+            started = false;
+            visible = false;
+            screen.classList.remove('visible');
+            document.body.classList.remove('kp-cinema-playing');
+            hero.classList.remove('kp-cinema-playing');
+            if (youtube && youtube.pauseVideo) youtube.pauseVideo();
+            else player.pause();
+            progress.style.transition = 'none';
+            progress.style.width = '0';
+        }
+        function exitScreen(finish) {
+            cancelling = true;
+            var hadControl = visible;
+            leave();
+            if (finish && current()) stopPreview();
+            if (hadControl && controller.enabled().name === 'kp_cinema') controller.toggle('full_start');
+            cancelling = false;
+            if (!finish && current()) schedule();
+        }
+        function unmute() {
+            if (youtube) youtube.unMute();
+            else player.muted = false;
+            window.kpCinemaSound = true;
+            sound.hidden = true;
+        }
+        function keys(e) {
+            if (!visible) return;
+            var key = e.key || ({13:'Enter',27:'Escape',8:'Backspace',37:'ArrowLeft',38:'ArrowUp',39:'ArrowRight',40:'ArrowDown'})[e.keyCode];
+            if (key !== 'Enter' && !/^(Arrow(Left|Right|Up|Down)|Escape|Backspace)$/.test(key)) return;
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            if (key === 'Enter') unmute();
+            else exitScreen(key === 'Escape' || key === 'Backspace');
+        }
+        function playNow() {
+            clearTimeout(preview.timer);
+            if (!focused() || started) return;
+            started = true;
+            var promise;
+            if (youtube) youtube.playVideo();
+            else {
+                player.muted = true;
+                promise = player.play();
+            }
+            if (promise && promise.catch) promise.catch(function () { if (current() && started) exitScreen(true); });
+            preview.watchdog = setTimeout(function () { if (current() && !visible) exitScreen(true); }, 12000);
+        }
+        function schedule() {
+            if (!focused() || started || cancelling || !thumb.parentNode) return;
+            clearTimeout(preview.timer);
+            progress.getBoundingClientRect();
+            progress.style.transition = 'width ' + delay + 'ms linear';
+            progress.style.width = '100%';
+            preview.timer = setTimeout(playNow, delay);
+        }
+        function focusChanged() {
+            if (cancelling || !current() || (visible && controller.enabled().name === 'kp_cinema')) return;
+            if (focused()) schedule();
+            else leave();
+        }
+        preview.cleanup = function () {
+            leave();
+            if (controller.listener) controller.listener.remove('toggle', focusChanged);
+            document.removeEventListener('keydown', keys, true);
+            player.onplaying = player.onerror = player.onended = player.ontimeupdate = null;
+            clearInterval(youtubeTick);
+            if (youtube) { youtube.destroy(); youtube = null; }
+            if (preview.hls) { preview.hls.destroy(); preview.hls = null; }
+            player.removeAttribute('src');
+            player.load();
+            thumb.remove();
+            screen.remove();
+            if (controller.enabled().name === 'kp_cinema') controller.toggle('full_start');
+        };
+        thumb.className = 'kp-cinema-thumb';
+        thumb.setAttribute('role', 'button');
+        thumb.tabIndex = 0;
+        thumb.onkeydown = function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); playNow(); } };
+        thumb.setAttribute('aria-label','Посмотреть трейлер');
+        thumb.onclick = playNow;
+        thumb.appendChild(progress);
+        screen.className = 'kp-cinema-screen';
+        player.playsInline = true;
+        player.setAttribute('playsinline', '');
+        player.muted = true;
+        info.className = 'kp-cinema-controls';
+        sound.type = 'button';
+        sound.textContent = '◉　Включить звук';
+        sound.onclick = unmute;
+        name.textContent = movie.title || movie.name || '';
+        info.appendChild(name);
+        info.appendChild(sound);
+        screen.appendChild(player);
+        screen.appendChild(info);
+        screen.onclick = function (event) { if (event.target !== sound && visible) exitScreen(false); };
+        function playing() {
+            if (!current() || !started || visible) return;
+            clearTimeout(preview.reveal);
+            preview.reveal = setTimeout(function () {
+                if (!focused() || !started) return;
+                clearTimeout(preview.watchdog);
+                delay = 5000;
+                visible = true;
+                screen.classList.add('visible');
+                hero.classList.add('kp-cinema-playing');
+                document.body.classList.add('kp-cinema-playing');
+                if (window.kpCinemaSound && (!navigator.userActivation || navigator.userActivation.hasBeenActive)) unmute();
+                else sound.hidden = false;
+                if (controller.add) {
+                    controller.add('kp_cinema', {
+                        toggle:function () { controller.clear(); },
+                        enter:unmute, left:function () { exitScreen(false); }, right:function () { exitScreen(false); },
+                        up:function () { exitScreen(false); }, down:function () { exitScreen(false); }, back:function () { exitScreen(true); }
+                    });
+                    controller.toggle('kp_cinema');
+                }
+            }, 500);
+        }
+        player.onplaying = playing;
+        player.onended = player.onerror = function () { if (current()) exitScreen(true); };
+        function fadeAudio() {
+            if (!visible) return;
+            var duration = youtube ? youtube.getDuration() : player.duration;
+            if (!isFinite(duration) || duration <= 18) return;
+            var left = duration - (youtube ? youtube.getCurrentTime() : player.currentTime);
+            if (left <= 13) exitScreen(true);
+            else if (left <= 18) {
+                var volume = (left - 13) / 5;
+                if (youtube) youtube.setVolume(volume * 100); else player.volume = volume;
+            }
+        }
+        player.ontimeupdate = fadeAudio;
+        document.addEventListener('keydown', keys, true);
+        if (controller.listener) controller.listener.follow('toggle', focusChanged);
+        function showThumbnail(image) {
+            if (image) {
+                var img = document.createElement('img');
+                img.alt = '';
+                img.src = image;
+                thumb.insertBefore(img, progress);
+            }
+            hero.querySelector('.kp-cinema-social').appendChild(thumb);
+            schedule();
+        }
+        var language = app.Storage.get('tmdb_lang', 'ru');
+        var options = (movieVideos && movieVideos.results || []).filter(function (v) {
+            return (!v.site || v.site === 'YouTube') && /^[a-zA-Z0-9_-]{11}$/.test(v.key) &&
+                (v.iso_639_1 === language || v.iso_639_1 === 'en');
+        }).sort(function (a, b) {
+            return Number(b.iso_639_1 === language) - Number(a.iso_639_1 === language) ||
+                Date.parse(b.published_at) - Date.parse(a.published_at);
+        });
+        if (options.length && window.YT && window.YT.Player) {
+            var mount = document.createElement('div');
+            screen.replaceChild(mount, player);
+            document.body.appendChild(screen);
+            youtube = new window.YT.Player(mount, {
+                videoId: options[0].key, width: '100%', height: '200%',
+                playerVars: {autoplay:0, controls:1, mute:1, playsinline:1, disablekb:1, fs:0, rel:0},
+                events: {
+                    onReady:function () {
+                        if (current()) showThumbnail('https://img.youtube.com/vi/' + options[0].key + '/default.jpg');
+                    },
+                    onStateChange:function (e) {
+                        if (!current()) return;
+                        if (e.data === 1) playing();
+                        if (e.data === 0) exitScreen(true);
+                    },
+                    onError:function () { if (current()) exitScreen(true); }
+                }
+            });
+            youtubeTick = setInterval(fadeAudio, 200);
+            return;
+        }
+        function load(id) {
+            if (!id || !current()) return;
+            trailers(id).then(function (clips) {
+                if (!current()) return;
+                if (!clips.length) return stopPreview();
+                var clip = clips[0];
+                var poster = root.querySelector('.full-start__background,.full-start-new__img');
+                var image = clip.preview || (poster && poster.src);
+                document.body.appendChild(screen);
+                if (/\.m3u8(?:\?|$)/i.test(clip.url) && !player.canPlayType('application/vnd.apple.mpegurl')) {
+                    if (!window.Hls || !window.Hls.isSupported()) return stopPreview();
+                    var hls = preview.hls = new window.Hls();
+                    hls.on(window.Hls.Events.ERROR,function (_, e) { if (e.fatal && current()) exitScreen(true); });
+                    hls.loadSource(clip.url);
+                    hls.attachMedia(player);
+                } else player.src = clip.url;
+                showThumbnail(image);
+            }).catch(function () { if (current()) stopPreview(); });
+        }
+        var id = movie.kinopoisk_id || resolvedIds[(movie.name ? 'tv' : 'movie') + '/' + movie.id];
+        if (id) load(id); else identifyMovie(movie, load, true);
+    }
+
     function cardPresentation(movie, root) {
         stopPreview();
         var hero = root.querySelector('.full-start-new, .full-start');
@@ -1143,6 +1409,7 @@
         });
     }
 
+    var filmStyle;
     if (document.head) {
         var style = document.createElement('style');
         var detailTags = ['.full-start-new__rate-line', '.full-start__rate-line'].reduce(function (selectors, line) {
@@ -1155,10 +1422,31 @@
         }).join(',');
         style.textContent = [
             '.menu .menu__item[data-action="feed"],.kp-description-row>.items-line__head{display:none}',
-            '.full-start-new{padding-bottom:3em}.kp-description-row .full-descr__text{line-height:1.48}',
             '@font-face {font-family: "KP Inter";font-style: normal;font-display: swap;font-weight: 100 900;src: url(https://cdn.jsdelivr.net/npm/@fontsource-variable/inter@5.2.8/files/inter-latin-wght-normal.woff2) format("woff2");unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;}',
             '@font-face {font-family: "KP Inter";font-style: normal;font-display: swap;font-weight: 100 900;src: url(https://cdn.jsdelivr.net/npm/@fontsource-variable/inter@5.2.8/files/inter-cyrillic-wght-normal.woff2) format("woff2");unicode-range: U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116;}',
             'html body,body button,body input,body select,body textarea{font-family:-apple-system,BlinkMacSystemFont,"KP Inter",system-ui,Arial,sans-serif}',
+            posterTags + '{box-sizing:border-box;min-height:2.1em;min-width:2.1em;padding:.27em .74em;border:0;border-radius:5em;background:rgba(0,0,0,.35);color:#fff;font-size:1em;font-weight:500;line-height:1.2;font-variant-numeric:tabular-nums;align-items:center;justify-content:center}',
+            posterTags + '{display:inline-flex;min-height:1.95em;min-width:1.95em;font-size:.92em;padding:.22em .63em;font-weight:600;z-index:2}',
+            '.kp-home-cards .card .card__type{top:.4em;left:.4em;right:auto;bottom:auto}.kp-home-cards .card .card__quality{bottom:.4em;left:.4em;right:auto}.kp-home-cards .card .card__vote.kp-home-score{bottom:.4em;right:.4em;left:auto}',
+            '.card__title,.items-line__title,.settings__title,.modal__title,.selectbox__title{font-weight:600;letter-spacing:-.012em}',
+            '.card__view>.card__marker--viewed,.full-start-new__poster>.card__marker--viewed,.full-start__poster>.card__marker--viewed,.kp-watched-overlay{position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;box-sizing:border-box;padding:0;border-radius:1em;background:rgba(0,0,0,.42);z-index:1;pointer-events:none}',
+            '.card__marker.card__marker--viewed:before,.kp-watched-overlay:before{content:"";display:block;width:1.95em;height:1.95em;width:var(--kp-check-width,1.95em);height:var(--kp-check-height,1.95em);margin:0;border:0;border-radius:0;background:transparent center/contain no-repeat url("data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 28 29%27 fill=%27none%27 stroke=%27white%27 stroke-width=%272.7%27%3E%3Ccircle cx=%2714%27 cy=%2714.5%27 r=%2713%27/%3E%3Cpath d=%27m8 14.5 4 4 8-8%27 stroke-linecap=%27round%27 stroke-linejoin=%27round%27/%3E%3C/svg%3E")}',
+            '.card__marker--viewed>span{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}',
+            '.kp-profile-seen>.card__marker--viewed{display:none}.card__view>.card__vote,.card__view>.card__icons{z-index:2}',
+            '.kp-home-cards .kp-no-score .card__vote,.kp-profile-seen .card__icon.icon--history{display:none}',
+            '.kp-home-cards .card__view>.card__vote.kp-mine{background-color:#278543!important}.kp-row-description{font-size:1em;font-weight:400;line-height:1.35;opacity:.72;margin:.25em 0 1em}',
+            '.items-line__head+.kp-row-description{margin-left:1.5em;margin-right:1.5em}',
+            '.kp-row-description.kp-grid-description{margin:0 1.5em 1em}',
+            '.kp-cinema,.kp-cinema-screen{font-family:SegoeUI,sans-serif}.kp-cinema{transition:opacity .3s,transform .3s}.kp-cinema .full-start-new__body{height:80vh;display:flex;align-items:flex-end}.kp-cinema .full-start-new__left,.kp-cinema .full-start-new__tagline,.kp-cinema .full-start__rate{display:none}.kp-cinema .full-start-new__right{display:flex;width:100%;min-width:0;align-items:flex-end;margin:0;padding:0;background:none;overflow:visible}.kp-cinema-info{flex:1;min-width:0}.kp-cinema .full-start-new__title{text-shadow:0 0 .1em rgba(0,0,0,.3)}',
+            '.kp-cinema-social{display:flex;align-items:center;position:relative;flex-shrink:0}.kp-cinema-social .full-start-new__rate-line{margin:0 0 0 3.5em;padding:0}.kp-cinema-social .full-start-new__rate-line>*:last-child{margin-right:0!important}.kp-cinema-social .full-start-new__reactions{margin:0}.kp-cinema-social .full-start-new__reactions.focus{margin-right:-2.8em}.kp-cinema-social .full-start-new__reactions:not(.focus):not(:focus-within):not(:hover)>div:not(:first-child){display:none}.kp-cinema-social .full-start-new__reactions:not(.focus):not(:focus-within):not(:hover) .reaction{position:relative}.kp-cinema-social .full-start-new__reactions:not(.focus):not(:focus-within):not(:hover) .reaction__count{position:absolute;top:28%;left:95%;font-size:1.2em;font-weight:500}',
+            '.full-start__background.kp-cinema-background{left:0;object-fit:cover;-webkit-mask-image:linear-gradient(#000 50%,transparent);mask-image:linear-gradient(#000 50%,transparent)}.full-start__background.kp-cinema-background.loaded:not(.dim){opacity:1}.kp-cinema-playing .kp-cinema-background{opacity:0!important}.kp-cinema.kp-cinema-playing{opacity:0;transform:translateY(50%)}body.kp-cinema-playing .head{transform:translateY(-100%)}',
+            '.kp-cinema-thumb{position:absolute;bottom:100%;right:0;width:6em;height:4em;overflow:hidden;border-radius:.3em;background:#000;cursor:pointer}.kp-cinema-thumb img{width:100%;height:100%;object-fit:cover}.kp-cinema-thumb:after{content:"";position:absolute;inset:0;border-top:.8em solid black;border-bottom:.8em solid black}.kp-cinema-thumb i{position:absolute;bottom:0;height:.2em;left:50%;transform:translateX(-50%);background:white;z-index:1}',
+            '.kp-cinema-screen{position:fixed;inset:0;top:0;right:0;bottom:0;left:0;z-index:1000;overflow:hidden;background:#000;opacity:0;visibility:hidden;pointer-events:none;transition:opacity .3s}.kp-cinema-screen.visible{visibility:visible;opacity:1;pointer-events:auto}.kp-cinema-screen video,.kp-cinema-screen iframe{border:0;position:absolute;top:50%;left:0;width:100%;height:200%;transform:translateY(-50%);object-fit:contain}.kp-cinema-controls{position:absolute;bottom:1.5em;left:1.5em;right:1.5em;display:flex;align-items:flex-end;justify-content:space-between;gap:1em;color:#fff;text-shadow:0 1px 8px #000}.kp-cinema-controls b{min-width:0;font-size:4em;font-weight:600;line-height:1.4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.kp-cinema-controls button{font:inherit;color:inherit;background:rgba(0,0,0,.4);border:0;border-radius:.4em;padding:.7em;cursor:pointer}',
+            '@media(max-width:600px){.kp-cinema .full-start-new__right{flex-wrap:wrap}.kp-cinema-info{flex-basis:100%}.kp-cinema-social{margin-top:1em;margin-left:auto}.kp-cinema-controls b{font-size:2em}.kp-cinema .full-start-new__body{height:auto;min-height:80vh}}'
+        ].join('');
+        filmStyle = document.createElement('style');
+        filmStyle.textContent = [
+            '.full-start-new{padding-bottom:3em}.kp-description-row .full-descr__text{line-height:1.48}',
             '.full-start-new .full-start-new__head,.kp-description-row .full-descr__info-name{font-size:.86em;font-weight:400;line-height:1.4;color:#aab0b3;letter-spacing:normal}',
             '.full-start-new .full-start-new__head>span{color:inherit}',
             '.kp-film-meta{display:flex;flex-wrap:wrap;align-items:baseline;column-gap:.65em;row-gap:4px;margin-top:auto}.kp-film-specs{display:flex;align-items:center;flex-wrap:wrap;color:#aab0b3;margin:0 0 1em}.kp-film-specs:empty{display:none}.kp-film-specs>.kp-film-quality,.kp-film-specs>.full-start__pg,.kp-film-specs>.full-start__status{box-sizing:border-box;display:inline-flex;align-items:center;height:1.62em;padding:0 .38em;margin:0 .46em 0 0;border:1px solid currentColor;border-radius:3px;background:transparent;color:inherit;font-size:.8125em;font-weight:500;line-height:1;white-space:nowrap}',
@@ -1168,13 +1456,10 @@
             '.full-start-new .full-start-new__title{font-weight:700}',
             '.full-start-new .full-start-new__tagline{font-weight:400}',
             '.full-start-new .full-start-new__rate-line{font-size:1em}',
-            detailTags.join(',') + ',' + posterTags + '{box-sizing:border-box;min-height:2.1em;min-width:2.1em;padding:.27em .74em;border:0;border-radius:5em;background:rgba(0,0,0,.35);color:#fff;font-size:1em;font-weight:500;line-height:1.2;font-variant-numeric:tabular-nums;align-items:center;justify-content:center}',
+            detailTags.join(',') + '{box-sizing:border-box;min-height:2.1em;min-width:2.1em;padding:.27em .74em;border:0;border-radius:5em;background:rgba(0,0,0,.35);color:#fff;font-size:1em;font-weight:500;line-height:1.2;font-variant-numeric:tabular-nums;align-items:center;justify-content:center}',
             detailTags.map(function (sel) { return sel + ':not(.hide)'; }).join(',') + '{display:inline-flex;flex:0 0 auto}',
-            posterTags + '{display:inline-flex;min-height:1.95em;min-width:1.95em;font-size:.92em;padding:.22em .63em;font-weight:600;z-index:2}',
-            '.kp-home-cards .card .card__type{top:.4em;left:.4em;right:auto;bottom:auto}.kp-home-cards .card .card__quality{bottom:.4em;left:.4em;right:auto}.kp-home-cards .card .card__vote.kp-home-score{bottom:.4em;right:.4em;left:auto}',
             '.full-start__rate-line>.full-start__rate>div,.full-start-new__rate-line>.full-start__rate>div{flex:0 0 auto;width:auto;height:auto;background:transparent;padding:0;font:inherit;color:inherit}',
             '.full-start__rate-line>.full-start__rate>div+div,.full-start-new__rate-line>.full-start__rate>div+div{margin-left:.4em}',
-            '.card__title,.items-line__title,.settings__title,.modal__title,.selectbox__title{font-weight:600;letter-spacing:-.012em}',
             '.full-start-new .full-start-new__right{min-width:0;--kp-chip-gap:.55em}',
             '.full-start-new .full-start-new__head{line-height:1.4;margin:0}',
             '.full-start-new .full-start-new__title{line-height:1.05;letter-spacing:-.018em;margin:0 0 .22em}',
@@ -1200,27 +1485,18 @@
             '.full-start-new__rate-line>.rate--tmdb,.full-start__rate-line>.rate--tmdb{order:-2}',
             '.full-start-new__rate-line>.rate--critics,.full-start__rate-line>.rate--critics{order:-1}',
             '@media(min-width:601px){.kp-preview-active .full-start__background{visibility:hidden}.full-start-new.kp-trailer-playing,.full-start.kp-trailer-playing{background:transparent}}',
-            '@media(min-width:601px){.kp-layout-cardify .full-start__background{left:0;top:0;height:80vh;object-fit:cover;-webkit-mask-image:linear-gradient(#000 50%,transparent 100%);mask-image:linear-gradient(#000 50%,transparent 100%)}.kp-layout-cardify .full-start__background.loaded:not(.dim){opacity:1}.kp-layout-cardify .full-start-new__body{min-height:80vh;align-items:flex-end}.kp-layout-cardify .full-start-new__body>.full-start-new__left{position:absolute;top:0;right:0;width:2.5em;height:2.5em;margin:0;pointer-events:none}.kp-layout-cardify .full-start-new__left:before,.kp-layout-cardify .full-start-new__poster>img{display:none}.kp-layout-cardify .full-start-new__left>.full-start-new__poster{background:transparent}.kp-layout-cardify .full-start-new__body>.full-start-new__right{align-self:flex-end;width:100%}.kp-layout-cardify .full-start-new__right>.kp-film-meta,.kp-layout-cardify .full-start-new__right>.full-start-new__rate-line{margin-top:0}}',
-            '@media(min-width:901px){.kp-layout-cardify .full-start-new__body>.full-start-new__right{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);column-gap:2em;align-items:end}.kp-layout-cardify .full-start-new__right>*{grid-column:1}.kp-layout-cardify .full-start-new__right>.kp-film-specs{grid-row:1}.kp-layout-cardify .full-start-new__right>.full-start-new__title{grid-row:2}.kp-layout-cardify .full-start-new__right>.full-start-new__tagline{grid-row:3}.kp-layout-cardify .full-start-new__right>.kp-film-meta{grid-row:4}.kp-layout-cardify .full-start-new__right>.full-start-new__buttons{grid-row:5;flex-wrap:wrap}.kp-layout-cardify .full-start-new__right>.full-start-new__rate-line,.kp-layout-cardify .full-start-new__right>.full-start-new__reactions{grid-column:2;justify-content:flex-end;margin:0}.kp-layout-cardify .full-start-new__right>.full-start-new__rate-line{grid-row:4}.kp-layout-cardify .full-start-new__right>.full-start-new__reactions{grid-row:5}}',
-            '@media(max-width:600px){.kp-layout-cardify .full-start-new__body{display:block}.kp-layout-cardify .full-start-new__body>.full-start-new__left{width:auto;margin:0}.kp-layout-cardify .full-start-new__left:before{display:none}.kp-layout-cardify .full-start-new__left>.full-start-new__poster{position:relative;width:100%;height:32vh;padding:0;overflow:hidden}.kp-layout-cardify .full-start-new__poster>img{object-position:50% 28%}.kp-layout-cardify .full-start-new__body>.full-start-new__right{margin:1.2em 0 0;padding:0;background:transparent}}',
             '.kp-preview-layer{position:absolute;z-index:-1;top:0;right:0;bottom:0;width:58%;display:flex;align-items:center;overflow:hidden;pointer-events:none;opacity:0;transition:opacity .45s ease;-webkit-mask-image:linear-gradient(to right,transparent,#000 64%);mask-image:linear-gradient(to right,transparent,#000 64%)}',
             '.kp-preview-frame{position:relative;width:100%;height:auto;max-height:100%;overflow:hidden;-webkit-mask-image:linear-gradient(to bottom,transparent,#000 22%,#000 70%,transparent);mask-image:linear-gradient(to bottom,transparent,#000 22%,#000 70%,transparent)}.kp-preview-frame:before{content:"";display:block;padding-top:42.55%}.kp-preview-layer.is-playing{opacity:1}.kp-preview-layer video{position:absolute;inset:0;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center}',
             '@media(max-width:600px){.kp-preview-layer{display:none}}',
             '.kp-preview-frame:after{content:"";position:absolute;inset:0;top:0;left:0;right:0;bottom:0;background:linear-gradient(to right,#101416,rgba(0,0,0,.68) 34%,rgba(0,0,0,.24) 78%)}',
-            '@media (min-width:601px) and (max-width:960px){.kp-preview-layer{width:45%}.kp-preview-frame:after{background:linear-gradient(to right,#101416,rgba(0,0,0,.74) 55%,rgba(0,0,0,.54))}}',
-            '.card__view>.card__marker--viewed,.full-start-new__poster>.card__marker--viewed,.full-start__poster>.card__marker--viewed,.kp-watched-overlay{position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;box-sizing:border-box;padding:0;border-radius:1em;background:rgba(0,0,0,.42);z-index:1;pointer-events:none}',
-            '.card__marker.card__marker--viewed:before,.kp-watched-overlay:before{content:"";display:block;width:1.95em;height:1.95em;width:var(--kp-check-width,1.95em);height:var(--kp-check-height,1.95em);margin:0;border:0;border-radius:0;background:transparent center/contain no-repeat url("data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 28 29%27 fill=%27none%27 stroke=%27white%27 stroke-width=%272.7%27%3E%3Ccircle cx=%2714%27 cy=%2714.5%27 r=%2713%27/%3E%3Cpath d=%27m8 14.5 4 4 8-8%27 stroke-linecap=%27round%27 stroke-linejoin=%27round%27/%3E%3C/svg%3E")}',
-            '.card__marker--viewed>span{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}',
-            '.kp-profile-seen>.card__marker--viewed{display:none}.card__view>.card__vote,.card__view>.card__icons{z-index:2}',
-            '.kp-home-cards .kp-no-score .card__vote,.kp-profile-seen .card__icon.icon--history{display:none}',
-            '.kp-home-cards .card__view>.card__vote.kp-mine{background-color:#278543!important}.kp-row-description{font-size:1em;font-weight:400;line-height:1.35;opacity:.72;margin:.25em 0 1em}',
-            '.items-line__head+.kp-row-description{margin-left:1.5em;margin-right:1.5em}',
-            '.kp-row-description.kp-grid-description{margin:0 1.5em 1em}'
+            '@media (min-width:601px) and (max-width:960px){.kp-preview-layer{width:45%}.kp-preview-frame:after{background:linear-gradient(to right,#101416,rgba(0,0,0,.74) 55%,rgba(0,0,0,.54))}}'
         ].join('');
+        document.head.appendChild(filmStyle);
         document.head.appendChild(style);
     }
     app.Listener.follow('activity', function (e) {
         homeActivity(e);
+        if (e.type === 'start' && e.component === 'full') window.setTimeout(refreshCardLayout, 0);
         if (!activePreview || (e.type !== 'archive' && e.type !== 'destroy')) return;
         var node = e.object && e.object.activity && e.object.activity.render()[0];
         if (!node || node === activePreview.root || node.contains(activePreview.root)) stopPreview();
@@ -1230,9 +1506,18 @@
 
     app.Listener.follow('full', function (e) {
         if (e.type !== 'complite' || !e.data || !e.data.movie) return;
-        actionsButton(e);
         var holder = e.object && e.object.activity && e.object.activity.render();
         var cardRoot = holder && holder[0];
+        var hero = cardRoot && cardRoot.querySelector && cardRoot.querySelector('.full-start-new');
+        if (hero) hero.classList.add('kp-film-prepared');
+        if (hero && enabled('kp_personal_cardify')) {
+            stopPreview();
+            scoreView = null;
+            cardifyLayout(cardRoot, hero, e.data.movie);
+            startCinemaTrailer(cardRoot, hero, e.data.movie, e.data.videos);
+            return;
+        }
+        actionsButton(e);
         if (cardRoot && cardRoot.querySelector) cardPresentation(e.data.movie, cardRoot);
         var selected = e.object && (e.object.card || (e.object.params && e.object.params.card));
         if (selected && selected.kpReason && e.object.activity) {
@@ -1417,11 +1702,30 @@
     }, true);
     if (window.appready) profile().then(importViewed);
     else app.Listener.follow('app', function (e) { if (e.type === 'ready') profile().then(importViewed); });
+    function refreshCardLayout() {
+        var activity = app.Activity && app.Activity.active();
+        if (!activity || activity.component !== 'full' || !activity.activity) return;
+        var hero = activity.activity.render()[0].querySelector('.kp-film-prepared');
+        if (hero && hero.classList.contains('kp-cinema') !== enabled('kp_personal_cardify')) {
+            stopPreview();
+            app.Activity.replace();
+        }
+    }
     function applyCardLayout() {
-        if (document.documentElement) document.documentElement.classList.toggle('kp-layout-cardify', enabled('kp_personal_cardify'));
+        if (filmStyle) filmStyle.media = enabled('kp_personal_cardify') ? 'not all' : 'all';
     }
     applyCardLayout();
-    setting('kp_personal_cardify', 'Карточка в стиле Cardify', 'Крупный фон и информация о фильме внизу. На широком экране рейтинги и реакции справа.', applyCardLayout);
+    setting('kp_personal_cardify', 'Карточка в стиле Cardify', 'Название и действия внизу слева, реакции и статус справа.', function () {
+        applyCardLayout();
+        refreshCardLayout();
+    });
+    setting('kp_cardify_trailers', 'Автотрейлер Cardify', 'Миниатюра сменяется видео во весь экран. OK включает звук, стрелки возвращают карточку.', function () {
+        var active = app.Activity && app.Activity.active();
+        if (enabled('kp_personal_cardify') && active && active.component === 'full') {
+            stopPreview();
+            app.Activity.replace();
+        }
+    });
     setting('kp_personal_backdrop', 'Трейлер КП на фоне', 'Запускать трейлер без звука поверх фона карточки.', function () {
         if (String(app.Storage.get('kp_personal_backdrop', true)) !== 'true') stopPreview();
     }, true);
