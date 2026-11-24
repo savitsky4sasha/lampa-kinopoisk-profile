@@ -268,7 +268,7 @@
     };
     app.Api.sources[source] = catalog;
     var homeCallbacks = [];
-    var homeOrder = ['watchlist', 'discover', 'pick', 'history'];
+    var homeOrder = ['watchlist', 'discover', 'pick'];
     homeOrder.forEach(function (id, index) {
         var row = rows.find(function (entry) { return entry.id === id; });
         function load(done) { content(row, 1, done, true); }
@@ -428,6 +428,7 @@
             if (!result.vote || !result.vote[method] || result.vote[method].status !== 'SUCCESS')
                 throw new Error('КП не подтвердил изменение оценки.');
             confirmed[id] = {value: value, time: Date.now()};
+            scheduleHome();
             if (scoreView) { scoreView.revision = null; scoreView(snapshot); }
             app.Noty.show(value ? 'Оценка на КП: ' + value + '/10' : 'Оценка удалена на КП');
             var extra = [];
@@ -466,7 +467,7 @@
             var items = result.trailers && result.trailers.items || [];
             return items.map(function (item) {
                 var url = String(item.streamUrl || '').replace(/^\/\//, 'https://');
-                return {title: item.title || 'Трейлер', url: url};
+                return {title: item.title || 'Трейлер', url: url, hls_type: 'native'};
             }).filter(function (clip) { return /^https?:\/\//i.test(clip.url); });
         }).catch(function (err) { delete trailersCache[id]; throw err; });
         trailersCache[id] = {time: Date.now(), promise: promise};
@@ -477,7 +478,10 @@
         if (type === 'trailers') {
             trailers(id).then(function (clips) {
                 if (!clips.length) return app.Noty.show('На КП пока нет доступных трейлеров');
-                menu('Трейлеры Кинопоиска', clips, function (clip) { app.Player.play(clip); });
+                menu('Трейлеры Кинопоиска', clips, function (clip) {
+                    app.Player.play(clip);
+                    if (app.Player.playlist) app.Player.playlist(clips);
+                });
             }).catch(function () { app.Noty.show('Не удалось загрузить трейлеры КП'); });
             return;
         }
@@ -566,10 +570,117 @@
         button.on('hover:enter', function () {
             withId(function (id, entry, base) { showMovieActions(movie, entry, id, base); });
         }).appendTo(buttons);
-        $('<div class="full-start__button selector kp-trailer-button"><svg><use xlink:href="#sprite-play"></use></svg><span>Трейлеры КП</span></div>')
-            .on('hover:enter', function () {
-                withId(function (id) { extras(id, 'trailers'); });
-            }).appendTo(buttons);
+        var sources = holder.find('.buttons--container').first();
+        if (!sources.length) return;
+        var trailer = $('<div class="full-start__button selector kp-trailer-source"><svg><use xlink:href="#sprite-trailer"></use></svg><span>Трейлеры КП</span></div>');
+        trailer.on('hover:enter', function () {
+            app.Controller.toggle('content');
+            withId(function (id) { extras(id, 'trailers'); });
+        });
+        var youtube = sources.find('.view--trailer').first();
+        if (youtube.length) trailer.insertAfter(youtube);
+        else trailer.appendTo(sources);
+    }
+
+    function watchedPoster(poster, seen) {
+        var overlay = poster.querySelector('.kp-watched-overlay');
+        poster.classList.toggle('kp-profile-seen', seen);
+        if (seen && !overlay) {
+            overlay = document.createElement('span');
+            overlay.className = 'kp-watched-overlay';
+            overlay.setAttribute('role', 'img');
+            overlay.setAttribute('aria-label', 'Просмотрено');
+            poster.appendChild(overlay);
+        } else if (!seen && overlay) overlay.remove();
+    }
+
+    var descriptions = {
+        watchlist: 'Всё, что ты отложил на Кинопоиске, в порядке твоего списка.',
+        pick: 'Непросмотренное из «Буду смотреть». Выше — жанры, которым ты чаще ставишь хорошие оценки.',
+        discover: 'Фильмы и сериалы, похожие на твои любимые. Уже просмотренное и отложенное пропускаем.',
+        history: 'Всё, что ты оценил или отметил просмотренным на Кинопоиске.'
+    };
+    var homePage = null, homeObserver, homeProfile, homeMatches = {}, homeTimer;
+    function drawHomeCard(node) {
+        var movie = node.card_data;
+        var poster = node.querySelector('.card__view');
+        if (!movie || !poster || !(movie.title || movie.name)) return;
+        node.classList.add('kp-home-film');
+        if (homeProfile !== snapshot) { homeMatches = {}; homeProfile = snapshot; }
+        var key = JSON.stringify([movie.source, movie.kinopoisk_id, movie.id, movie.title || movie.name,
+            movie.original_title || movie.original_name, movie.first_air_date || movie.release_date]);
+        if (!Object.prototype.hasOwnProperty.call(homeMatches, key)) homeMatches[key] = movieEntry(movie, snapshot);
+        var entry = homeMatches[key] || movie.kpEntry;
+        var personal = currentVote(movie.kinopoisk_id || (entry && entry.kp), entry);
+        var audience = Number(entry && entry.kpAudience) || Number(movie.kp_rating) || Number(movie.ratingKinopoisk);
+        var score = personal || audience;
+        var badge = poster.querySelector('.kp-home-score');
+        if (score > 0 && score <= 10) {
+            if (!badge) {
+                badge = document.createElement('div');
+                badge.className = 'card__vote kp-home-score';
+                poster.appendChild(badge);
+            }
+            var label = 'КП ' + (personal || audience.toFixed(1));
+            if (badge.textContent !== label) badge.textContent = label;
+            badge.title = personal ? 'Моя оценка на Кинопоиске' : 'Рейтинг зрителей Кинопоиска';
+            badge.classList.toggle('kp-mine', !!personal);
+        } else if (badge) badge.remove();
+        watchedPoster(poster, !!personal || !!(snapshot && entry && snapshot.history.indexOf(entry) >= 0));
+    }
+    function drawHome() {
+        if (!homePage) return;
+        var root = homePage.root;
+        Array.prototype.forEach.call(root.querySelectorAll('.card'), drawHomeCard);
+        if (homePage.row) {
+            var first = root.querySelector('.card');
+            if (first && !root.querySelector('.kp-grid-description')) {
+                var desc = document.createElement('div');
+                desc.className = 'kp-row-description kp-grid-description';
+                desc.textContent = descriptions[homePage.row.id];
+                first.parentNode.parentNode.insertBefore(desc, first.parentNode);
+            }
+        } else if (homePage.tab) {
+            Array.prototype.forEach.call(root.querySelectorAll('.items-line__title'), function (heading) {
+                var row = rows.find(function (r) { return r.title === heading.textContent.trim(); });
+                var head = heading.parentNode;
+                if (!row || head.parentNode.querySelector('.kp-row-description')) return;
+                var desc = document.createElement('div');
+                desc.className = 'kp-row-description';
+                desc.textContent = descriptions[row.id];
+                head.parentNode.insertBefore(desc, head.nextSibling);
+            });
+        }
+    }
+    function scheduleHome() {
+        if (!homePage || homeTimer) return;
+        homeTimer = window.setTimeout(function () { homeTimer = null; drawHome(); }, 25);
+    }
+    function homeActivity(e) {
+        if (!window.MutationObserver || !e.object || !e.object.activity) return;
+        if (e.type !== 'start' && e.type !== 'archive' && e.type !== 'destroy') return;
+        var root = e.object.activity.render()[0];
+        if (!root || !root.querySelector) return;
+        if (homePage && (e.type === 'start' || root === homePage.root)) {
+            homeObserver.disconnect();
+            homePage = null;
+        }
+        if (e.type !== 'start') return;
+        var row = e.component === 'category_full' && e.object.source === source &&
+            rows.find(function (r) { return r.id === e.object.url || r.title === e.object.title; });
+        if (e.component !== 'main' && e.component !== 'kp_personal_tab' && !row) return;
+        homePage = {root: root, row: row, tab: e.component === 'kp_personal_tab' || e.object.source === source};
+        root.classList.add('kp-home-cards');
+        homeObserver = new window.MutationObserver(function (changes) {
+            if (changes.some(function (change) {
+                return Array.prototype.some.call(change.addedNodes, function (el) {
+                    return el.nodeType === 1 && (el.matches('.card,.items-line') || el.querySelector('.card,.items-line'));
+                });
+            })) scheduleHome();
+        });
+        homeObserver.observe(root, {childList: true, subtree: true});
+        drawHome();
+        profile().then(scheduleHome);
     }
 
     var activePreview = null;
@@ -616,8 +727,11 @@
 
         function playBackground(url) {
             if (!current() || document.hidden || (app.Player.opened && app.Player.opened())) return;
+            var backdrop = root.querySelector('img.full-start__background');
+            var background = backdrop ? backdrop.parentNode : document.querySelector('.background');
+            if (!background) return;
             var layer = preview.layer = document.createElement('div');
-            layer.className = 'kp-preview-layer';
+            layer.className = 'kp-preview-layer ' + (backdrop ? 'full-start__background' : 'kp-preview-screen');
             var video = preview.video = document.createElement('video');
             video.muted = video.defaultMuted = true;
             video.playsInline = true;
@@ -625,8 +739,7 @@
             video.setAttribute('muted', '');
             layer.setAttribute('aria-hidden', 'true');
             layer.appendChild(video);
-            hero.classList.add('kp-preview-hero');
-            hero.insertBefore(layer, hero.firstChild);
+            background.insertBefore(layer, backdrop || null);
             function stop() { if (activePreview === preview) stopPreview(); }
             video.onended = video.onerror = stop;
             video.onplaying = function () {
@@ -682,16 +795,33 @@
 
     if (document.head) {
         var style = document.createElement('style');
-        style.textContent = '.kp-personal-reaction-line{display:flex;align-items:center;flex-wrap:wrap;gap:.75em;margin-bottom:1em}' +
-            '.kp-personal-reaction-line .full-start-new__reactions,.kp-personal-reaction-line .full-start__reactions{margin-bottom:0}' +
-            '.kp-personal-score{display:inline-flex;align-items:center;white-space:nowrap;border-radius:2em;padding:.48em .85em;line-height:1.2;color:white;font-weight:600}' +
-            '.kp-personal-score.focus{box-shadow:0 0 0 .16em currentColor}' +
-            '.kp-preview-hero{position:relative;isolation:isolate}.kp-preview-layer{position:absolute;inset:0;z-index:-1;overflow:hidden;pointer-events:none;opacity:0;transition:opacity .65s ease}' +
-            '.kp-preview-layer.is-playing{opacity:.78}.kp-preview-layer video{width:100%;height:100%;object-fit:cover}' +
-            '.kp-preview-layer:after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,rgba(14,17,27,.86),rgba(22,28,42,.28) 65%),linear-gradient(0deg,rgba(14,17,27,.96),transparent 50%)}';
+        style.textContent = [
+            '.kp-personal-reaction-line{display:flex;align-items:flex-start;flex-wrap:wrap;margin:-.5em -.5em 1em}',
+            '.kp-personal-reaction-line .full-start-new__reactions,.kp-personal-reaction-line .full-start__reactions{margin:0}',
+            '.kp-personal-score.reaction{box-sizing:border-box;display:inline-flex;justify-content:center;height:2.6em;white-space:nowrap;color:white}',
+            '.kp-personal-reaction-line>.kp-personal-score{margin:.5em}',
+            '.kp-personal-score.focus{box-shadow:0 0 0 .13em currentColor}',
+            '.full-start-new__rate-line>.rate--kp,.full-start__rate-line>.rate--kp{order:-3}',
+            '.full-start-new__rate-line>.rate--imdb,.full-start__rate-line>.rate--imdb{order:-2}',
+            '.full-start-new__rate-line>.rate--tmdb,.full-start__rate-line>.rate--tmdb{order:-1}',
+            '.kp-preview-layer{overflow:hidden;pointer-events:none;opacity:0;transition:opacity .55s ease}',
+            '.kp-preview-screen{position:absolute;top:0;bottom:0;left:0;right:0}',
+            '.kp-preview-layer.is-playing{opacity:.75}.kp-preview-layer.is-playing+img.full-start__background{opacity:0}',
+            '.kp-preview-layer video{display:block;width:100%;height:100%;object-fit:cover}',
+            '.kp-preview-layer:after{content:"";position:absolute;top:0;left:0;width:100%;height:100%;background:linear-gradient(90deg,rgba(14,17,27,.65),transparent 75%),linear-gradient(0deg,rgba(14,17,27,.72),transparent 60%)}',
+            '.card__view>.card__marker--viewed,.full-start-new__poster>.card__marker--viewed,.full-start__poster>.card__marker--viewed,.kp-watched-overlay{position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;box-sizing:border-box;padding:0;border-radius:1em;background:rgba(0,0,0,.42);z-index:1;pointer-events:none}',
+            '.card__marker.card__marker--viewed:before,.kp-watched-overlay:before{content:"✓";display:flex;align-items:center;justify-content:center;width:1.7em;height:1.7em;margin:0;border:2px solid currentColor;border-radius:50%;color:white;background:rgba(0,0,0,.36);font:600 1.25em/1 sans-serif}',
+            '.card__marker--viewed>span{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}',
+            '.kp-profile-seen>.card__marker--viewed{display:none}.card__view>.card__vote,.card__view>.card__icons{z-index:2}',
+            '.kp-home-cards .kp-home-film .card__view>.card__vote:not(.kp-home-score){display:none}',
+            '.kp-home-score.kp-mine{background:#278543}.kp-row-description{font-size:1em;font-weight:400;line-height:1.35;opacity:.72;margin:.25em 0 1em}',
+            '.items-line__head+.kp-row-description{margin-left:1.5em;margin-right:1.5em}',
+            '.kp-row-description.kp-grid-description{margin:0 1.5em 1em}'
+        ].join('');
         document.head.appendChild(style);
     }
     app.Listener.follow('activity', function (e) {
+        homeActivity(e);
         if (!activePreview || (e.type !== 'archive' && e.type !== 'destroy')) return;
         var node = e.object && e.object.activity && e.object.activity.render()[0];
         if (!node || node === activePreview.root || node.contains(activePreview.root)) stopPreview();
@@ -723,6 +853,8 @@
             draw.revision = p && p.updated;
             var k = movieEntry(movie, p);
             var watched = k && p.history.indexOf(k) >= 0;
+            var poster = cardRoot && cardRoot.querySelector && cardRoot.querySelector('.full-start-new__poster, .full-start__poster');
+            if (poster) watchedPoster(poster, !!watched || !!currentVote(movie.kinopoisk_id || (k && k.kp), k));
             var publicScore = Number(k && k.kpAudience) || Number(movie.kp_rating);
             if (publicScore > 0 && publicScore <= 10 && block[0].querySelector) {
                 var field = block[0].querySelector('.rate--kp');
@@ -745,8 +877,10 @@
             var value = currentVote(movie.kinopoisk_id || (k && k.kp), k);
             var surface = holder || block;
             surface.find('.kp-personal-score').remove();
-            var badge = $('<span class="kp-personal-score selector"></span>').text(value ? 'КП ' + value : 'Оценить на КП');
-            badge.css({backgroundColor: value ? (value >= 7 ? '#278543' : value >= 5 ? '#65666b' : '#bb4146') : 'rgba(35,36,42,.84)'});
+            var badge = $('<span class="reaction kp-personal-score selector"></span>');
+            var label = $('<span class="reaction__count"></span>').text(value ? 'КП ' + value : 'Оценить на КП');
+            label.appendTo(badge);
+            if (value) badge.css({backgroundColor: value >= 7 ? '#278543' : value >= 5 ? '#65666b' : '#bb4146'});
             badge.on('hover:enter', function () {
                 function rate(id) {
                     movie.kinopoisk_id = id;
@@ -864,6 +998,7 @@
         if (document.hidden || !endpoint()) return;
         profile().then(function (p) {
             if (!p || document.hidden) return;
+            if (homePage && homeProfile !== p) scheduleHome();
             importViewed(p);
             importFuture(p);
             if (scoreView) scoreView(p);
