@@ -507,7 +507,7 @@
                 throw new Error('КП не подтвердил изменение оценки.');
             confirmed[id] = {value: value, time: Date.now()};
             scheduleHome();
-            if (scoreView) { scoreView.revision = null; scoreView(snapshot); }
+            if (scoreView) scoreView(snapshot);
             app.Noty.show(value ? 'Оценка на КП: ' + value + '/10' : 'Оценка удалена на КП');
             var extra = [];
             if (value && enabled('kp_personal_remove_later')) {
@@ -533,8 +533,11 @@
         var score = currentVote(id, entry);
         var choices = [];
         for (var i = 10; i >= 1; i--) choices.push({title: String(i), value: i, selected: i === score});
-        choices.push({title: 'Удалить оценку', value: 0});
-        menu('Моя оценка на КП', choices, function (item) { vote(movie, id, item.value, token); });
+        if (score) choices.push({title: 'Удалить оценку', value: 0});
+        menu('Моя оценка на КП', choices, function (item) {
+            function save(access) { vote(movie, id, item.value, access); }
+            if (token) save(token); else withAccess(save);
+        });
     }
 
     var trailersCache = {};
@@ -875,65 +878,6 @@
             preview.layer.remove();
         }
     }
-    function arrangeFilmMetadata(hero, movie) {
-        var head = hero.querySelector('.full-start-new__head');
-        var details = hero.querySelector('.full-start-new__details');
-        if (!head) return;
-        if (!details) return;
-
-        var year = head.querySelector('span:first-child');
-        var country = year && year.nextSibling;
-        if (country && country.nodeType === 3)
-            country.nodeValue = country.nodeValue.replace(/^, /, ' • ').replace(/ [|] /g, ', ');
-
-        var parts = Array.prototype.slice.call(details.children).filter(function (item) {
-            return !item.classList.contains('full-start-new__split');
-        });
-        var duration = Number(movie.runtime) > 0 && parts.find(function (item) {
-            return /^\d{1,3}:\d{2}$/.test(item.textContent.trim());
-        });
-        var genres = (movie.genres || []).slice(0, 5).map(function (g) { return g.name; }).filter(Boolean);
-        var genreList = genres.length && parts.find(function (item) {
-            return item.textContent.trim().toLowerCase() === genres.join(' | ').toLowerCase();
-        });
-        function move(item, text) {
-            if (!item) return;
-            var next = item.nextElementSibling, prev = item.previousElementSibling;
-            if (next && next.classList.contains('full-start-new__split')) next.remove();
-            else if (prev && prev.classList.contains('full-start-new__split')) prev.remove();
-            if (head.textContent.trim()) head.appendChild(document.createTextNode(' • '));
-            if (text) item.textContent = text;
-            head.appendChild(item);
-            head.classList.remove('hide');
-        }
-        if (genreList) move(genreList, genreList.textContent.split(' | ').slice(0, 2).join(', '));
-        move(duration);
-        var specs = hero.querySelector('.kp-film-specs');
-        if (!specs) {
-            specs = document.createElement('div');
-            specs.className = 'kp-film-specs';
-        }
-        var buttons = hero.querySelector('.full-start-new__buttons');
-        var title = hero.querySelector('.full-start-new__title');
-        if (!buttons || !title) return;
-        var meta = hero.querySelector('.kp-film-meta');
-        if (!meta) {
-            meta = document.createElement('div');
-            meta.className = 'kp-film-meta';
-        }
-        if (buttons.previousElementSibling !== meta) buttons.parentNode.insertBefore(meta, buttons);
-        if (head.parentNode !== meta) meta.appendChild(head);
-        if (details.parentNode !== meta) meta.appendChild(details);
-        if (title.previousElementSibling !== specs) title.parentNode.insertBefore(specs, title);
-        var tags = hero.querySelectorAll('.full-start-new__rate-line > .full-start__pg, .full-start-new__rate-line > .full-start__status');
-        Array.prototype.forEach.call(tags, function (tag) {
-            if (!tag.classList.contains('hide') && tag.textContent.trim()) {
-                if (tag.classList.contains('full-start__status') && tag.textContent.trim() === 'Выпущенный') tag.textContent = 'Выпущен';
-                specs.appendChild(tag);
-            }
-        });
-        return specs;
-    }
     function kinoPubResolution(item) {
         var best = 0;
         function inspect(video) {
@@ -994,32 +938,24 @@
             });
         });
     }
-    function watchRatings(line) {
-        if (!line || line.kpRatingObserver) return;
-        function update() {
-            var fields = line.querySelectorAll('.rate--kp:not(.hide), .rate--imdb:not(.hide)');
-            var publicKp = null;
-            var preferred = false;
-            Array.prototype.forEach.call(fields, function (field) {
-                var value = Number((field.firstElementChild || field).textContent.trim().replace(',', '.'));
-                if (!(value > 0 && value <= 10)) return;
-                preferred = true;
-                if (field.classList.contains('rate--kp')) publicKp = field;
-            });
-            var personal = line.querySelector('.kp-personal-score[data-voted]');
-            if (personal && personal.parentNode !== (publicKp || line)) {
-                if (publicKp) publicKp.appendChild(personal);
-                else line.insertBefore(personal, line.firstChild);
-            }
-            if (line.classList.contains('kp-preferred-ratings') !== preferred)
-                line.classList.toggle('kp-preferred-ratings', preferred);
-        }
-        update();
-        if (window.MutationObserver) {
-            line.kpRatingObserver = new MutationObserver(update);
-            line.kpRatingObserver.observe(line, {subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['class']});
-        }
+    function ratingRow(hero) {
+        var row = hero.querySelector('.kp-card-ratings');
+        if (row) return row;
+        var original = hero.querySelector('.full-start-new__rate-line, .full-start__rate-line');
+        if (!original) return null;
+        row = document.createElement('div');
+        row.className = 'kp-card-ratings';
+        var anchor = hero.querySelector('.full-start-new__reactions, .full-start__reactions, .full-start-new__buttons, .full-start__buttons');
+        if (anchor) anchor.parentNode.insertBefore(row, anchor);
+        else original.parentNode.insertBefore(row, original.nextSibling);
+        ['kp', 'imdb', 'tmdb'].forEach(function (source) {
+            var field = original.querySelector('.rate--' + source);
+            if (field) row.appendChild(field);
+        });
+        hero.classList.add('kp-native-card');
+        return row;
     }
+
     function cardifyLayout(root, hero, movie) {
         if (hero.classList.contains('kp-cinema')) return;
         var content = hero.querySelector('.full-start-new__right');
@@ -1287,23 +1223,9 @@
         stopPreview();
         var hero = root.querySelector('.full-start-new, .full-start');
         if (!hero) return;
-        var description = root.querySelector('.full-descr');
-        var descriptionRow = description && description.closest('.items-line');
-        if (descriptionRow) descriptionRow.classList.add('kp-description-row');
-        var specs = arrangeFilmMetadata(hero, movie);
+        var specs = hero.querySelector('.full-start-new__rate-line, .full-start__rate-line');
         var previousQuality = hero.querySelector('.kp-film-quality');
         if (previousQuality) previousQuality.remove();
-        watchRatings(hero.querySelector('.full-start-new__rate-line, .full-start__rate-line'));
-        var playIcon = hero.querySelector('.button--play > svg');
-        var poster = hero.querySelector('.full-start-new__poster, .full-start__poster');
-        if (poster && playIcon) {
-            var icon = window.getComputedStyle(playIcon);
-            var em = parseFloat(window.getComputedStyle(poster).fontSize);
-            if (em > 0 && parseFloat(icon.width) > 0 && parseFloat(icon.height) > 0) {
-                poster.style.setProperty('--kp-check-width', parseFloat(icon.width) / em + 'em');
-                poster.style.setProperty('--kp-check-height', parseFloat(icon.height) / em + 'em');
-            }
-        }
         var preview = activePreview = {root: root};
         function current() { return activePreview === preview && document.documentElement.contains(root); }
         function showRating(type, value) {
@@ -1390,7 +1312,7 @@
                     request.timeout(4500);
                     request.native('https://rating.kinopoisk.ru/' + id + '.xml', function (xml) {
                         var data = typeof xml === 'string' ? new DOMParser().parseFromString(xml, 'text/xml') : xml;
-                        if (!data || !data.querySelector) return;
+                        if (!current() || !data || !data.querySelector) return;
                         ['kp', 'imdb'].forEach(function (name) {
                             var node = data.querySelector(name + '_rating');
                             if (node) showRating(name, node.textContent);
@@ -1412,11 +1334,6 @@
     var filmStyle;
     if (document.head) {
         var style = document.createElement('style');
-        var detailTags = ['.full-start-new__rate-line', '.full-start__rate-line'].reduce(function (selectors, line) {
-            return selectors.concat(['.full-start__rate', '.full-start__pg', '.full-start__status'].map(function (tag) {
-                return line + '>' + tag;
-            }));
-        }, []);
         var posterTags = ['.card__type', '.card__quality', '.card__vote.kp-home-score', '.card__new-episode>div'].map(function (tag) {
             return '.kp-home-cards .card ' + tag;
         }).join(',');
@@ -1446,44 +1363,12 @@
         ].join('');
         filmStyle = document.createElement('style');
         filmStyle.textContent = [
-            '.full-start-new{padding-bottom:3em}.kp-description-row .full-descr__text{line-height:1.48}',
-            '.full-start-new .full-start-new__head,.kp-description-row .full-descr__info-name{font-size:.86em;font-weight:400;line-height:1.4;color:#aab0b3;letter-spacing:normal}',
-            '.full-start-new .full-start-new__head>span{color:inherit}',
-            '.kp-film-meta{display:flex;flex-wrap:wrap;align-items:baseline;column-gap:.65em;row-gap:4px;margin-top:auto}.kp-film-specs{display:flex;align-items:center;flex-wrap:wrap;color:#aab0b3;margin:0 0 1em}.kp-film-specs:empty{display:none}.kp-film-specs>.kp-film-quality,.kp-film-specs>.full-start__pg,.kp-film-specs>.full-start__status{box-sizing:border-box;display:inline-flex;align-items:center;height:1.62em;padding:0 .38em;margin:0 .46em 0 0;border:1px solid currentColor;border-radius:3px;background:transparent;color:inherit;font-size:.8125em;font-weight:500;line-height:1;white-space:nowrap}',
-            '.full-start-new,.full-start{position:relative;isolation:isolate}.full-start-new__body{position:relative}',
-            '@media(min-width:481px){.full-start-new .full-start-new__body{align-items:stretch}.full-start-new__body>.full-start-new__left{position:relative;width:17.5%;margin-right:2.25em}.full-start-new__body>.full-start-new__left:before{content:"";display:block;padding-top:150%}.full-start-new__left>.full-start-new__poster{position:absolute;top:0;left:0;width:100%;height:100%;padding:0}.full-start-new__poster>img{object-fit:cover}.full-start-new__body>.full-start-new__right{display:flex;flex-direction:column;min-width:0}.full-start-new .full-start-new__right>.full-start-new__buttons{margin:0;padding-top:1.5em}}',
-            '@media(min-width:481px) and (max-width:960px){.full-start-new__body>.full-start-new__left{width:24%;margin-right:1.5em}}',
-            '.full-start-new .full-start-new__title{font-weight:700}',
-            '.full-start-new .full-start-new__tagline{font-weight:400}',
-            '.full-start-new .full-start-new__rate-line{font-size:1em}',
-            detailTags.join(',') + '{box-sizing:border-box;min-height:2.1em;min-width:2.1em;padding:.27em .74em;border:0;border-radius:5em;background:rgba(0,0,0,.35);color:#fff;font-size:1em;font-weight:500;line-height:1.2;font-variant-numeric:tabular-nums;align-items:center;justify-content:center}',
-            detailTags.map(function (sel) { return sel + ':not(.hide)'; }).join(',') + '{display:inline-flex;flex:0 0 auto}',
-            '.full-start__rate-line>.full-start__rate>div,.full-start-new__rate-line>.full-start__rate>div{flex:0 0 auto;width:auto;height:auto;background:transparent;padding:0;font:inherit;color:inherit}',
-            '.full-start__rate-line>.full-start__rate>div+div,.full-start-new__rate-line>.full-start__rate>div+div{margin-left:.4em}',
-            '.full-start-new .full-start-new__right{min-width:0;--kp-chip-gap:.55em}',
-            '.full-start-new .full-start-new__head{line-height:1.4;margin:0}',
-            '.full-start-new .full-start-new__title{line-height:1.05;letter-spacing:-.018em;margin:0 0 .22em}',
-            '.full-start-new .full-start-new__tagline{font-size:1.375em;font-size:max(22px,1.375em);line-height:1.32;max-width:40em;margin:0 0 .73em;color:rgba(255,255,255,.88)}',
-            '.full-start-new .full-start-new__rate-line{flex-wrap:wrap;gap:0;padding-top:0;margin:auto 0 0}',
-            '.full-start-new .full-start-new__rate-line>*{margin:0 var(--kp-chip-gap,.55em) var(--kp-chip-gap,.55em) 0!important;white-space:nowrap}',
-            '.full-start-new .full-start-new__details{line-height:1.35;min-height:0;margin:0}',
-            '.full-start-new .full-start-new__details>*{margin:.22em .35em}',
-            '.full-start-new .full-start-new__details:empty,.full-start-new .full-start-new__head:empty{display:none}',
-            '.full-start-new .full-start-new__buttons>.full-start__button{margin-right:.6em}',
-            '@media(max-width:480px){.kp-film-meta+.full-start-new__buttons{margin-top:1.5em}}@media(max-width:700px){.full-start-new .full-start-new__right{max-width:100%}}',
-            '.full-start-new__rate-line,.full-start__rate-line{align-items:center}.kp-preferred-ratings>.rate--tmdb{display:none!important}',
-            '.full-start-new .full-start-new__reactions,.full-start .full-start__reactions{display:flex;align-items:center;flex-wrap:wrap;gap:0;margin:0 0 .5em;min-height:0}',
-            '.full-start-new__reactions>div,.full-start__reactions>div{padding:0;margin:0 var(--kp-chip-gap,.55em) var(--kp-chip-gap,.55em) 0}',
-            '.full-start-new__reactions .reaction,.full-start__reactions .reaction,.kp-personal-score.reaction{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;height:2.1em;min-height:2.1em;padding:.27em .74em;border-radius:5em;background-color:rgba(0,0,0,.35);color:#fff;font-size:1em;font-weight:500;line-height:1.2;white-space:nowrap}',
-            '.full-start-new__reactions .reaction--voted,.full-start__reactions .reaction--voted{background-color:rgba(255,255,255,.3)}',
-            '.full-start-new__reactions .reaction__icon,.full-start__reactions .reaction__icon{width:1.15em;height:1.15em;margin-right:.4em}.full-start-new__reactions .reaction__count,.full-start__reactions .reaction__count,.kp-personal-score .reaction__count{padding:0;font:inherit}',
-            '.kp-personal-score.reaction{order:-5;cursor:pointer}.kp-personal-score.focus,.kp-personal-score:focus-visible{outline:2px solid white;outline-offset:2px}',
-            '.kp-personal-score[data-voted]{background-color:#278543}.full-start-new__rate-line>.kp-personal-score[data-voted]:before,.full-start__rate-line>.kp-personal-score[data-voted]:before{content:"КП";margin-right:.35em}',
-            '.full-start__rate.rate--kp:has(>.kp-personal-score){padding-left:.25em}.full-start__rate.rate--kp>.kp-personal-score{order:-1;flex:none;width:1.55em;height:1.55em;min-width:0;min-height:0;border:0;border-radius:50%;padding:0;margin:0 .45em 0 0;background:#278543;color:white;font:inherit;font-weight:650;line-height:1}',
-            '.full-start-new__rate-line>.rate--kp,.full-start__rate-line>.rate--kp{order:-4}',
-            '.full-start-new__rate-line>.rate--imdb,.full-start__rate-line>.rate--imdb{order:-3}',
-            '.full-start-new__rate-line>.rate--tmdb,.full-start__rate-line>.rate--tmdb{order:-2}',
-            '.full-start-new__rate-line>.rate--critics,.full-start__rate-line>.rate--critics{order:-1}',
+            '.kp-native-card .full-start-new__reactions,.kp-native-card .full-start__reactions,.kp-native-card .button--reaction{display:none!important}',
+            '.kp-card-ratings{display:flex;align-items:center;flex-wrap:wrap;margin:0 0 .9em}',
+            '.kp-card-ratings>.full-start__rate,.kp-card-ratings>.kp-personal-score{margin:0 .65em .35em 0}',
+            '.kp-card-ratings .kp-personal-score{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;flex:0 0 2.2em;width:2.2em;height:2.2em;padding:0;border:.12em solid rgba(255,255,255,.7);border-radius:50%;color:white;background:rgba(0,0,0,.45);font-weight:600;cursor:pointer}',
+            '.kp-card-ratings .kp-personal-score[data-voted]{background:#246941;border-color:#87c99d}.kp-card-ratings .kp-personal-score.focus,.kp-card-ratings .kp-personal-score:focus{outline:0;box-shadow:0 0 0 .16em white}',
+            '.kp-native-card .kp-film-quality{margin-right:.65em}.kp-native-card.kp-trailer-playing{isolation:isolate;position:relative}',
             '@media(min-width:601px){.kp-preview-active .full-start__background{visibility:hidden}.full-start-new.kp-trailer-playing,.full-start.kp-trailer-playing{background:transparent}}',
             '.kp-preview-layer{position:absolute;z-index:-1;top:0;right:0;bottom:0;width:58%;display:flex;align-items:center;overflow:hidden;pointer-events:none;opacity:0;transition:opacity .45s ease;-webkit-mask-image:linear-gradient(to right,transparent,#000 64%);mask-image:linear-gradient(to right,transparent,#000 64%)}',
             '.kp-preview-frame{position:relative;width:100%;height:auto;max-height:100%;overflow:hidden;-webkit-mask-image:linear-gradient(to bottom,transparent,#000 22%,#000 70%,transparent);mask-image:linear-gradient(to bottom,transparent,#000 22%,#000 70%,transparent)}.kp-preview-frame:before{content:"";display:block;padding-top:42.55%}.kp-preview-layer.is-playing{opacity:1}.kp-preview-layer video{position:absolute;inset:0;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center}',
@@ -1508,7 +1393,7 @@
         if (e.type !== 'complite' || !e.data || !e.data.movie) return;
         var holder = e.object && e.object.activity && e.object.activity.render();
         var cardRoot = holder && holder[0];
-        var hero = cardRoot && cardRoot.querySelector && cardRoot.querySelector('.full-start-new');
+        var hero = cardRoot && cardRoot.querySelector && cardRoot.querySelector('.full-start-new, .full-start');
         if (hero) hero.classList.add('kp-film-prepared');
         if (hero && enabled('kp_personal_cardify')) {
             stopPreview();
@@ -1517,6 +1402,8 @@
             startCinemaTrailer(cardRoot, hero, e.data.movie, e.data.videos);
             return;
         }
+        if (!hero) return;
+        var row = ratingRow(hero);
         actionsButton(e);
         if (cardRoot && cardRoot.querySelector) cardPresentation(e.data.movie, cardRoot);
         var selected = e.object && (e.object.card || (e.object.params && e.object.params.card));
@@ -1526,19 +1413,28 @@
                 $('<div class="kp-personal-reason"></div>').css({fontSize: '0.85em', opacity: 0.8})
                     .text(selected.kpReason).insertAfter(heading);
         }
-        var movie = e.data.movie, block = $('.full-start-new__rate-line:visible, .full-start__rate-line:visible').last();
-        if (!block.length) block = $('.full-start-new__title:visible, .full-start__title:visible').last();
+        if (!row) return;
+        var movie = e.data.movie, block = $(row), k;
+        var badge = block.find('.kp-personal-score');
+        if (!badge.length) {
+            badge = $('<span class="kp-personal-score selector" role="button" tabindex="0"></span>').prependTo(block);
+            if (app.Controller && app.Controller.collectionAppend && app.Controller.enabled().name === 'full_start')
+                app.Controller.collectionAppend(badge);
+        }
+        badge.off('hover:enter.kpVote').on('hover:enter.kpVote', function () {
+            var id = movie.kinopoisk_id || (k && k.kp);
+            function rate(kpId) {
+                movie.kinopoisk_id = kpId;
+                chooseVote(movie, kpId, k);
+            }
+            if (id) rate(id); else identifyMovie(movie, rate);
+        });
         var draw = function (p) {
-            if (!block.length || !$.contains(document, block[0])) {
+            if (!$.contains(document, row)) {
                 if (scoreView === draw) scoreView = null;
                 return;
             }
-            if (p && draw.revision === p.updated) return;
-            draw.revision = p && p.updated;
-            var k = movieEntry(movie, p);
-            var watched = k && p.history.indexOf(k) >= 0;
-            var poster = cardRoot && cardRoot.querySelector && cardRoot.querySelector('.full-start-new__poster, .full-start__poster');
-            if (poster) watchedPoster(poster, !!watched || !!currentVote(movie.kinopoisk_id || (k && k.kp), k));
+            k = movieEntry(movie, p);
             var publicScore = Number(k && k.kpAudience) || Number(movie.kp_rating);
             if (publicScore > 0 && publicScore <= 10 && block[0].querySelector) {
                 var field = block[0].querySelector('.rate--kp');
@@ -1559,27 +1455,14 @@
                 }
             }
             var value = currentVote(movie.kinopoisk_id || (k && k.kp), k);
-            var surface = holder || block;
-            surface.find('.kp-personal-score').remove();
-            var badge = $('<span class="reaction kp-personal-score selector"></span>');
-            var label = $('<span class="reaction__count"></span>').text(value ? String(value) : 'Оценить на КП');
-            label.appendTo(badge);
+            badge.text(value ? String(value) : '+');
             if (value) badge.attr('data-voted', 'true');
-            badge.on('hover:enter', function () {
-                function rate(id) {
-                    movie.kinopoisk_id = id;
-                    withAccess(function (token) { chooseVote(movie, id, k, token); });
-                }
-                var id = movie.kinopoisk_id || (k && k.kp);
-                if (id) rate(id); else identifyMovie(movie, rate);
-            });
+            else badge.removeAttr('data-voted');
             var hint = value ? 'Моя оценка на Кинопоиске: ' + value + '. Изменить' : 'Поставить оценку на Кинопоиске';
-            badge.attr('title', hint).attr('aria-label', hint).attr('role', 'button').prependTo(block);
-            if (app.Controller && app.Controller.collectionAppend && app.Controller.enabled().name === 'full_start')
-                app.Controller.collectionAppend(badge);
-
+            badge.attr('title', hint).attr('aria-label', hint);
         };
         scoreView = draw;
+        draw(snapshot);
         profile().then(draw);
     });
     function enabled(name) {
