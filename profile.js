@@ -861,20 +861,22 @@
         var preview = activePreview;
         activePreview = null;
         window.clearTimeout(preview.timer);
-        if (preview.backdrop) preview.backdrop.classList.remove('kp-preview-hidden');
         if (preview.hls) preview.hls.destroy();
         if (preview.video) {
             preview.video.onplaying = preview.video.onerror = preview.video.onended = null;
             preview.video.pause();
             preview.video.removeAttribute('src');
             preview.video.load();
+            if (preview.layer.parentNode) preview.layer.parentNode.classList.remove('kp-trailer-playing');
             preview.layer.remove();
         }
     }
     function arrangeFilmMetadata(hero, movie) {
         var head = hero.querySelector('.full-start-new__head');
         var details = hero.querySelector('.full-start-new__details');
-        if (!head || !details) return;
+        if (!head) return;
+        var anchor = hero.querySelector('.full-start-new__tagline') || hero.querySelector('.full-start-new__title');
+        if (!details) return;
 
         var year = head.querySelector('span:first-child');
         var date = String(movie.release_date || movie.first_air_date || '');
@@ -906,15 +908,111 @@
             head.appendChild(item);
             head.classList.remove('hide');
         }
-        if (genreList) move(genreList, genreList.textContent.replace(/ [|] /g, ', '));
+        if (genreList) move(genreList, genreList.textContent.split(' | ').slice(0, 2).join(', '));
         move(duration);
+        var specs = hero.querySelector('.kp-film-specs');
+        if (!specs) {
+            specs = document.createElement('div');
+            specs.className = 'kp-film-specs';
+        }
+        if (anchor && anchor.parentNode === head.parentNode && anchor.nextElementSibling !== specs)
+            head.parentNode.insertBefore(specs, anchor.nextSibling);
+        if (specs.parentNode !== head.parentNode) head.parentNode.insertBefore(specs, head);
+        if (specs.nextElementSibling !== head) head.parentNode.insertBefore(head, specs.nextSibling);
         var tags = hero.querySelectorAll('.full-start-new__rate-line > .full-start__pg, .full-start-new__rate-line > .full-start__status');
         Array.prototype.forEach.call(tags, function (tag) {
-            if (tag.classList.contains('hide') || !tag.textContent.trim()) return;
-            head.appendChild(document.createTextNode(' '));
-            head.appendChild(tag);
-            head.classList.remove('hide');
+            if (!tag.classList.contains('hide') && tag.textContent.trim()) {
+                if (tag.classList.contains('full-start__status') && tag.textContent.trim() === 'Выпущенный') tag.textContent = 'Выпущен';
+                specs.appendChild(tag);
+            }
         });
+        return specs;
+    }
+    function kinoPubResolution(item) {
+        var best = 0;
+        function inspect(video) {
+            (video.files || []).forEach(function (file) {
+                if (!file || !file.url || !Object.keys(file.url).length) return;
+                var quality = String(file.quality || file.q || '').toLowerCase();
+                var height = /^(?:4k|uhd)$/.test(quality) ? 2160 : parseInt(quality, 10);
+                if ([2160, 1440, 1080, 720, 576, 480, 360, 240].indexOf(height) !== -1)
+                    best = Math.max(best, height);
+            });
+        }
+        (item.videos || []).forEach(inspect);
+        (item.seasons || []).forEach(function (season) { (season.episodes || []).forEach(inspect); });
+        return best === 2160 ? '4K' : best ? best + 'p' : '';
+    }
+    function loadKinoPubQuality(movie, imdb, current, specs) {
+        if (!specs || !window.online_kp_plugin || !current()) return;
+        var token = app.Storage.get('kp_token', '');
+        var title = movie.title || movie.name || movie.original_title || movie.original_name;
+        if (!token || !title) return;
+        function get(path) {
+            return $.ajax({url: 'https://api.service-kp.com/v1/items/' + path, dataType: 'json',
+                headers: {Authorization: 'Bearer ' + token}, timeout: 6500});
+        }
+        var serial = !!(movie.name || movie.first_air_date || movie.number_of_seasons);
+        var year = String(movie.release_date || movie.first_air_date || '').slice(0, 4);
+        var names = [title, movie.original_name, movie.original_title].filter(Boolean).map(function (n) {
+            return n.trim().toLowerCase();
+        });
+        get('search?field=title&perpage=50&type=' + (serial ? 'serial' : 'movie') + '&q=' + encodeURIComponent(title)).done(function (result) {
+            if (!current()) return;
+            var items = result.items || [];
+            var id = Number(String(imdb || '').replace(/^tt/, ''));
+            var kp = Number(movie.kinopoisk_id || (movie.kpEntry && movie.kpEntry.kp));
+            var match = items.find(function (item) {
+                return (id && Number(item.imdb) === id) || (kp && Number(item.kinopoisk) === kp);
+            });
+            if (!match) {
+                var exact = items.filter(function (item) {
+                    if ((id && Number(item.imdb) && id !== Number(item.imdb)) ||
+                        (kp && Number(item.kinopoisk) && kp !== Number(item.kinopoisk))) return false;
+                    return year && String(item.year) === year && String(item.title || '').split(' / ').some(function (n) {
+                        return names.indexOf(n.trim().toLowerCase()) !== -1;
+                    });
+                });
+                if (exact.length === 1) match = exact[0];
+            }
+            if (!match || !Number(match.id)) return;
+            get(String(Number(match.id))).done(function (result) {
+                if (!current() || !result.item) return;
+                var label = kinoPubResolution(result.item);
+                if (!label) return;
+                var quality = document.createElement('span');
+                quality.className = 'kp-film-quality';
+                quality.textContent = label;
+                quality.title = 'Максимальное доступное качество на Кинопабе';
+                specs.insertBefore(quality, specs.firstChild);
+            });
+        });
+    }
+    function watchRatings(line) {
+        if (!line || line.kpRatingObserver) return;
+        function update() {
+            var fields = line.querySelectorAll('.rate--kp:not(.hide), .rate--imdb:not(.hide)');
+            var publicKp = null;
+            var preferred = false;
+            Array.prototype.forEach.call(fields, function (field) {
+                var value = Number((field.firstElementChild || field).textContent.trim().replace(',', '.'));
+                if (!(value > 0 && value <= 10)) return;
+                preferred = true;
+                if (field.classList.contains('rate--kp')) publicKp = field;
+            });
+            var personal = line.querySelector('.kp-personal-score[data-voted]');
+            if (personal && personal.parentNode !== (publicKp || line)) {
+                if (publicKp) publicKp.appendChild(personal);
+                else line.insertBefore(personal, line.firstChild);
+            }
+            if (line.classList.contains('kp-preferred-ratings') !== preferred)
+                line.classList.toggle('kp-preferred-ratings', preferred);
+        }
+        update();
+        if (window.MutationObserver) {
+            line.kpRatingObserver = new MutationObserver(update);
+            line.kpRatingObserver.observe(line, {subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['class']});
+        }
     }
     function cardPresentation(movie, root) {
         stopPreview();
@@ -923,7 +1021,10 @@
         var description = root.querySelector('.full-descr');
         var descriptionRow = description && description.closest('.items-line');
         if (descriptionRow) descriptionRow.classList.add('kp-description-row');
-        arrangeFilmMetadata(hero, movie);
+        var specs = arrangeFilmMetadata(hero, movie);
+        var previousQuality = specs && specs.querySelector('.kp-film-quality');
+        if (previousQuality) previousQuality.remove();
+        watchRatings(hero.querySelector('.full-start-new__rate-line, .full-start__rate-line'));
         var playIcon = hero.querySelector('.button--play > svg');
         var poster = hero.querySelector('.full-start-new__poster, .full-start__poster');
         if (poster && playIcon) {
@@ -949,6 +1050,7 @@
         var oldCritics = root.querySelector('.rate--critics');
         if (oldCritics) oldCritics.remove();
         imdbId(movie).then(function (id) {
+            loadKinoPubQuality(movie, id, current, specs);
             if (!/^tt[0-9]+$/.test(id) || !current()) return;
             if (!Number(movie.imdb_rating)) imdbScore(id, kind === 'tv' ? 'series' : 'movie').then(function (score) {
                 if (current()) showRating('imdb', score);
@@ -969,29 +1071,27 @@
 
         function playBackground(url) {
             if (!current() || document.hidden || (app.Player.opened && app.Player.opened())) return;
-            var backdrop = root.querySelector('img.full-start__background');
-            var background = document.querySelector('.background');
-            if (!background && !backdrop) return;
+            if (window.matchMedia && window.matchMedia('(max-width: 600px)').matches) return;
             var layer = preview.layer = document.createElement('div');
-            layer.className = 'kp-preview-layer' + (background ? '' : ' kp-preview-local');
+            layer.className = 'kp-preview-layer';
             var video = preview.video = document.createElement('video');
             video.muted = video.defaultMuted = true;
             video.playsInline = true;
             video.setAttribute('playsinline', '');
             video.setAttribute('muted', '');
             layer.setAttribute('aria-hidden', 'true');
-            layer.appendChild(video);
-            // A sibling of the app background spans the viewport, including the header.
-            if (background) background.parentNode.insertBefore(layer, background.nextSibling);
-            else backdrop.parentNode.insertBefore(layer, backdrop);
-            preview.backdrop = backdrop;
+            var frame = document.createElement('div');
+            frame.className = 'kp-preview-frame';
+            frame.appendChild(video);
+            layer.appendChild(frame);
+            hero.insertBefore(layer, hero.firstChild);
             function stop() { if (activePreview === preview) stopPreview(); }
             video.onended = video.onerror = stop;
             video.onplaying = function () {
                 if (!current()) return stop();
                 window.clearTimeout(preview.timer);
                 layer.classList.add('is-playing');
-                if (backdrop) backdrop.classList.add('kp-preview-hidden');
+                hero.classList.add('kp-trailer-playing');
             };
             function play() {
                 var started = video.play();
@@ -1055,10 +1155,11 @@
             '@font-face {font-family: "KP Inter";font-style: normal;font-display: swap;font-weight: 100 900;src: url(https://cdn.jsdelivr.net/npm/@fontsource-variable/inter@5.2.8/files/inter-latin-wght-normal.woff2) format("woff2");unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;}',
             '@font-face {font-family: "KP Inter";font-style: normal;font-display: swap;font-weight: 100 900;src: url(https://cdn.jsdelivr.net/npm/@fontsource-variable/inter@5.2.8/files/inter-cyrillic-wght-normal.woff2) format("woff2");unicode-range: U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116;}',
             'html body,body button,body input,body select,body textarea{font-family:-apple-system,BlinkMacSystemFont,"KP Inter",system-ui,Arial,sans-serif}',
-            '.full-start-new .full-start-new__head{font-size:1em;font-weight:500;color:rgba(255,255,255,.72);letter-spacing:.01em}',
+            '.full-start-new .full-start-new__head,.kp-description-row .full-descr__info-name{font-size:.86em;font-weight:400;line-height:1.4;color:#aab0b3;letter-spacing:normal}',
             '.full-start-new .full-start-new__head>span{color:inherit}',
-            '.full-start-new__head>.full-start__pg,.full-start-new__head>.full-start__status{display:inline-block;vertical-align:.08em;margin-left:.18em;padding:.08em .34em;border:1px solid currentColor;border-radius:.12em;background:transparent;color:inherit;font-size:.8em;font-weight:600;line-height:1.08;white-space:nowrap}',
-            '@media(min-width:481px){.full-start-new .full-start-new__body{align-items:stretch}.full-start-new__body>.full-start-new__left{display:flex;flex-direction:column}.full-start-new__left>.full-start-new__poster{flex:1 0 auto}.full-start-new__body>.full-start-new__right{display:flex;flex-direction:column}.full-start-new .full-start-new__right>.full-start-new__rate-line,.full-start-new .full-start-new__right>.full-start-new__buttons{margin-top:auto}}',
+            '.kp-film-specs{display:flex;align-items:center;flex-wrap:wrap;color:#aab0b3;font-size:.86em;margin:0 0 .75em}.kp-film-specs:empty{display:none}.kp-film-specs>span,.kp-film-specs>.full-start__pg,.kp-film-specs>.full-start__status{display:inline-flex;align-items:center;box-sizing:border-box;padding:.08em .36em;margin:0 .45em 0 0;border:1px solid currentColor;border-radius:.14em;background:transparent;color:inherit;font-size:.85em;font-weight:500;line-height:1.25;white-space:nowrap}',
+            '.full-start-new,.full-start{position:relative;isolation:isolate}.full-start-new__body{position:relative}',
+            '@media(min-width:481px){.full-start-new .full-start-new__body{align-items:stretch}.full-start-new__body>.full-start-new__left{width:13.5em;max-width:26%;margin-right:2.25em}.full-start-new__body>.full-start-new__right{display:flex;flex-direction:column;min-width:0}.full-start-new .full-start-new__right>.full-start-new__buttons{margin-top:auto;padding-top:.75em}}',
             '.full-start-new .full-start-new__title{font-weight:700}',
             '.full-start-new .full-start-new__tagline{font-weight:400}',
             '.full-start-new .full-start-new__rate-line{font-size:1em}',
@@ -1069,32 +1170,35 @@
             '.full-start__rate-line>.full-start__rate>div,.full-start-new__rate-line>.full-start__rate>div{flex:0 0 auto;width:auto;height:auto;background:transparent;padding:0;font:inherit;color:inherit}',
             '.full-start__rate-line>.full-start__rate>div+div,.full-start-new__rate-line>.full-start__rate>div+div{margin-left:.4em}',
             '.card__title,.items-line__title,.settings__title,.modal__title,.selectbox__title{font-weight:600;letter-spacing:-.012em}',
-            '.full-start-new .full-start-new__right{min-width:0}',
-            '.full-start-new .full-start-new__head{line-height:1.4;margin-bottom:.7em}',
-            '.full-start-new .full-start-new__title{line-height:1.12;letter-spacing:-.018em;margin-bottom:.16em}',
-            '.full-start-new .full-start-new__tagline{font-size:1.35em;line-height:1.35;max-width:40em;margin:0 0 .85em;color:rgba(255,255,255,.88)}',
-            '.full-start-new .full-start-new__rate-line{flex-wrap:wrap;padding-top:0;margin:0 0 .8em}',
-            '.full-start-new .full-start-new__rate-line>*{margin:0 .65em .3em 0!important;white-space:nowrap}',
+            '.full-start-new .full-start-new__right{min-width:0;--kp-chip-gap:.55em}',
+            '.full-start-new .full-start-new__head{line-height:1.4;margin:0 0 1.15em}',
+            '.full-start-new .full-start-new__title{line-height:1.12;letter-spacing:-.018em;margin:0 0 .12em}',
+            '.full-start-new .full-start-new__tagline{font-size:22px;line-height:1.4;max-width:40em;margin:0 0 .78em;color:rgba(255,255,255,.88)}',
+            '.full-start-new .full-start-new__rate-line{flex-wrap:wrap;gap:0;padding-top:0;margin:0}',
+            '.full-start-new .full-start-new__rate-line>*{margin:0 var(--kp-chip-gap,.55em) var(--kp-chip-gap,.55em) 0!important;white-space:nowrap}',
             '.full-start-new .full-start-new__details{line-height:1.35;min-height:0;margin:-.22em -.35em .85em}',
             '.full-start-new .full-start-new__details>*{margin:.22em .35em}',
             '.full-start-new .full-start-new__details:empty,.full-start-new .full-start-new__head:empty{display:none}',
-            '.full-start-new .kp-personal-reaction-line{margin:-.5em -.5em .75em}',
             '.full-start-new .full-start-new__buttons>.full-start__button{margin-right:.6em}',
-            '@media(max-width:700px){.full-start-new .full-start-new__tagline{font-size:1.15em}.full-start-new .full-start-new__right{max-width:100%}}',
-            '.kp-personal-reaction-line{display:flex;align-items:flex-start;flex-wrap:wrap;margin:-.5em -.5em 1em}',
-            '.kp-personal-reaction-line .full-start-new__reactions,.kp-personal-reaction-line .full-start__reactions{margin:0}',
-            '.kp-personal-score.reaction{box-sizing:border-box;display:inline-flex;justify-content:center;height:2.6em;white-space:nowrap;color:white}',
-            '.kp-personal-reaction-line>.kp-personal-score{margin:.5em}',
-            '.kp-personal-score.focus{box-shadow:0 0 0 .13em currentColor}',
+            '@media(max-width:700px){.full-start-new .full-start-new__right{max-width:100%}}',
+            '.full-start-new__rate-line,.full-start__rate-line{align-items:center}.kp-preferred-ratings>.rate--tmdb{display:none!important}',
+            '.full-start-new .full-start-new__reactions,.full-start .full-start__reactions{display:flex;align-items:center;flex-wrap:wrap;gap:0;margin:0 0 .55em;min-height:0}',
+            '.full-start-new__reactions>div,.full-start__reactions>div{padding:0;margin:0 var(--kp-chip-gap,.55em) var(--kp-chip-gap,.55em) 0}',
+            '.full-start-new__reactions .reaction,.full-start__reactions .reaction,.kp-personal-score.reaction{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;height:2.1em;min-height:2.1em;padding:.27em .74em;border-radius:5em;background-color:rgba(0,0,0,.35);color:#fff;font-size:1em;font-weight:500;line-height:1.2;white-space:nowrap}',
+            '.full-start-new__reactions .reaction--voted,.full-start__reactions .reaction--voted{background-color:rgba(255,255,255,.3)}',
+            '.full-start-new__reactions .reaction__icon,.full-start__reactions .reaction__icon{width:1.15em;height:1.15em;margin-right:.4em}.full-start-new__reactions .reaction__count,.full-start__reactions .reaction__count,.kp-personal-score .reaction__count{padding:0;font:inherit}',
+            '.kp-personal-score.reaction{order:-5;cursor:pointer}.kp-personal-score.focus,.kp-personal-score:focus-visible{outline:2px solid white;outline-offset:2px}',
+            '.kp-personal-score[data-voted]{background-color:#278543}.full-start-new__rate-line>.kp-personal-score[data-voted]:before,.full-start__rate-line>.kp-personal-score[data-voted]:before{content:"КП";margin-right:.35em}',
+            '.full-start__rate.rate--kp:has(>.kp-personal-score){padding-left:.25em}.full-start__rate.rate--kp>.kp-personal-score{order:-1;flex:none;width:1.55em;height:1.55em;min-width:0;min-height:0;border:0;border-radius:50%;padding:0;margin:0 .45em 0 0;background:#278543;color:white;font:inherit;font-weight:650;line-height:1}',
             '.full-start-new__rate-line>.rate--kp,.full-start__rate-line>.rate--kp{order:-4}',
             '.full-start-new__rate-line>.rate--imdb,.full-start__rate-line>.rate--imdb{order:-3}',
             '.full-start-new__rate-line>.rate--tmdb,.full-start__rate-line>.rate--tmdb{order:-2}',
             '.full-start-new__rate-line>.rate--critics,.full-start__rate-line>.rate--critics{order:-1}',
-            '.kp-preview-layer{position:fixed;top:0;right:0;bottom:0;left:0;overflow:hidden;-webkit-mask-image:linear-gradient(to bottom,#000 0%,#000 55%,transparent 100%);mask-image:linear-gradient(to bottom,#000 0%,#000 55%,transparent 100%);pointer-events:none;opacity:0;transition:opacity .55s ease}',
-            '.kp-preview-local{z-index:-1}',
-            '.kp-preview-layer.is-playing{opacity:1}img.full-start__background.kp-preview-hidden{opacity:0}',
-            '.kp-preview-layer video{display:block;width:100%;height:100%;object-fit:cover;transform:scale(1.24)}',
-            '.kp-preview-layer:after{content:"";position:absolute;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.24)}',
+            '.full-start-new.kp-trailer-playing,.full-start.kp-trailer-playing{background:linear-gradient(to bottom,transparent,#101416 22%,#101416 70%,transparent)}',
+            '.kp-preview-layer{position:absolute;z-index:-1;top:0;right:0;bottom:0;width:58%;overflow:hidden;pointer-events:none;opacity:0;transition:opacity .45s ease;-webkit-mask-image:linear-gradient(to right,transparent,#000 64%);mask-image:linear-gradient(to right,transparent,#000 64%)}',
+            '.kp-preview-frame{position:absolute;top:0;right:0;bottom:0;left:0;overflow:hidden;-webkit-mask-image:linear-gradient(to bottom,transparent,#000 22%,#000 70%,transparent);mask-image:linear-gradient(to bottom,transparent,#000 22%,#000 70%,transparent)}.kp-preview-layer.is-playing{opacity:1}.kp-preview-layer video{position:absolute;left:0;top:-25%;width:100%;height:145%;object-fit:cover;object-position:center 50%}',
+            '.kp-preview-frame:after{content:"";position:absolute;inset:0;top:0;left:0;right:0;bottom:0;background:linear-gradient(to right,#101416,rgba(0,0,0,.68) 34%,rgba(0,0,0,.24) 78%)}',
+            '@media (min-width:601px) and (max-width:960px){.kp-preview-layer{width:45%}.kp-preview-frame:after{background:linear-gradient(to right,#101416,rgba(0,0,0,.74) 55%,rgba(0,0,0,.54))}}',
             '.card__view>.card__marker--viewed,.full-start-new__poster>.card__marker--viewed,.full-start__poster>.card__marker--viewed,.kp-watched-overlay{position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;box-sizing:border-box;padding:0;border-radius:1em;background:rgba(0,0,0,.42);z-index:1;pointer-events:none}',
             '.card__marker.card__marker--viewed:before,.kp-watched-overlay:before{content:"";display:block;width:1.95em;height:1.95em;width:var(--kp-check-width,1.95em);height:var(--kp-check-height,1.95em);margin:0;border:0;border-radius:0;background:transparent center/contain no-repeat url("data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 28 29%27 fill=%27none%27 stroke=%27white%27 stroke-width=%272.7%27%3E%3Ccircle cx=%2714%27 cy=%2714.5%27 r=%2713%27/%3E%3Cpath d=%27m8 14.5 4 4 8-8%27 stroke-linecap=%27round%27 stroke-linejoin=%27round%27/%3E%3C/svg%3E")}',
             '.card__marker--viewed>span{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}',
@@ -1164,9 +1268,9 @@
             var surface = holder || block;
             surface.find('.kp-personal-score').remove();
             var badge = $('<span class="reaction kp-personal-score selector"></span>');
-            var label = $('<span class="reaction__count"></span>').text(value ? 'КП ' + value : 'Оценить на КП');
+            var label = $('<span class="reaction__count"></span>').text(value ? String(value) : 'Оценить на КП');
             label.appendTo(badge);
-            if (value) badge.css({backgroundColor: value >= 7 ? '#278543' : value >= 5 ? '#65666b' : '#bb4146'});
+            if (value) badge.attr('data-voted', 'true');
             badge.on('hover:enter', function () {
                 function rate(id) {
                     movie.kinopoisk_id = id;
@@ -1175,12 +1279,8 @@
                 var id = movie.kinopoisk_id || (k && k.kp);
                 if (id) rate(id); else identifyMovie(movie, rate);
             });
-            var reactions = cardRoot && cardRoot.querySelector && cardRoot.querySelector('.full-start-new__reactions, .full-start__reactions');
-            if (reactions) {
-                if (!reactions.parentNode.classList.contains('kp-personal-reaction-line'))
-                    $(reactions).wrap('<div class="kp-personal-reaction-line"></div>');
-                badge.attr('title', value ? 'Моя оценка на Кинопоиске' : watched ? 'Просмотрено на КП · поставить оценку' : 'Поставить оценку на Кинопоиске').insertBefore(reactions);
-            } else badge.appendTo(block);
+            var hint = value ? 'Моя оценка на Кинопоиске: ' + value + '. Изменить' : 'Поставить оценку на Кинопоиске';
+            badge.attr('title', hint).attr('aria-label', hint).attr('role', 'button').prependTo(block);
             if (app.Controller && app.Controller.collectionAppend && app.Controller.enabled().name === 'full_start')
                 app.Controller.collectionAppend(badge);
 
