@@ -861,6 +861,7 @@
         var preview = activePreview;
         activePreview = null;
         window.clearTimeout(preview.timer);
+        if (preview.backdrop) preview.backdrop.classList.remove('kp-preview-hidden');
         if (preview.hls) preview.hls.destroy();
         if (preview.video) {
             preview.video.onplaying = preview.video.onerror = preview.video.onended = null;
@@ -876,6 +877,11 @@
         if (!head || !details) return;
 
         var year = head.querySelector('span:first-child');
+        var date = String(movie.release_date || movie.first_air_date || '');
+        if (year && /^\d{4}$/.test(year.textContent.trim()) && /^\d{4}-\d{2}-\d{2}$/.test(date) && !movie.kpEntry) {
+            var release = new Date(date + 'T12:00:00Z');
+            if (!isNaN(release.getTime())) year.textContent = release.toLocaleDateString('ru-RU', {day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC'}).replace(/\s*г\.$/, '');
+        }
         var country = year && year.nextSibling;
         if (country && country.nodeType === 3)
             country.nodeValue = country.nodeValue.replace(/^, /, ' • ').replace(/ [|] /g, ', ');
@@ -902,11 +908,21 @@
         }
         if (genreList) move(genreList, genreList.textContent.replace(/ [|] /g, ', '));
         move(duration);
+        var tags = hero.querySelectorAll('.full-start-new__rate-line > .full-start__pg, .full-start-new__rate-line > .full-start__status');
+        Array.prototype.forEach.call(tags, function (tag) {
+            if (tag.classList.contains('hide') || !tag.textContent.trim()) return;
+            head.appendChild(document.createTextNode(' '));
+            head.appendChild(tag);
+            head.classList.remove('hide');
+        });
     }
     function cardPresentation(movie, root) {
         stopPreview();
         var hero = root.querySelector('.full-start-new, .full-start');
         if (!hero) return;
+        var description = root.querySelector('.full-descr');
+        var descriptionRow = description && description.closest('.items-line');
+        if (descriptionRow) descriptionRow.classList.add('kp-description-row');
         arrangeFilmMetadata(hero, movie);
         var playIcon = hero.querySelector('.button--play > svg');
         var poster = hero.querySelector('.full-start-new__poster, .full-start__poster');
@@ -954,10 +970,10 @@
         function playBackground(url) {
             if (!current() || document.hidden || (app.Player.opened && app.Player.opened())) return;
             var backdrop = root.querySelector('img.full-start__background');
-            var background = backdrop ? backdrop.parentNode : document.querySelector('.background');
-            if (!background) return;
+            var background = document.querySelector('.background');
+            if (!background && !backdrop) return;
             var layer = preview.layer = document.createElement('div');
-            layer.className = 'kp-preview-layer ' + (backdrop ? 'full-start__background' : 'kp-preview-screen');
+            layer.className = 'kp-preview-layer' + (background ? '' : ' kp-preview-local');
             var video = preview.video = document.createElement('video');
             video.muted = video.defaultMuted = true;
             video.playsInline = true;
@@ -965,13 +981,17 @@
             video.setAttribute('muted', '');
             layer.setAttribute('aria-hidden', 'true');
             layer.appendChild(video);
-            background.insertBefore(layer, backdrop || null);
+            // A sibling of the app background spans the viewport, including the header.
+            if (background) background.parentNode.insertBefore(layer, background.nextSibling);
+            else backdrop.parentNode.insertBefore(layer, backdrop);
+            preview.backdrop = backdrop;
             function stop() { if (activePreview === preview) stopPreview(); }
             video.onended = video.onerror = stop;
             video.onplaying = function () {
                 if (!current()) return stop();
                 window.clearTimeout(preview.timer);
                 layer.classList.add('is-playing');
+                if (backdrop) backdrop.classList.add('kp-preview-hidden');
             };
             function play() {
                 var started = video.play();
@@ -1026,25 +1046,33 @@
                 return line + '>' + tag;
             }));
         }, []);
+        var posterTags = ['.card__type', '.card__quality', '.card__vote.kp-home-score', '.card__new-episode>div'].map(function (tag) {
+            return '.kp-home-cards .card ' + tag;
+        }).join(',');
         style.textContent = [
+            '.menu .menu__item[data-action="feed"],.kp-description-row>.items-line__head{display:none}',
+            '.full-start-new{padding-bottom:1.6em}.kp-description-row .full-descr__text{line-height:1.48}',
             '@font-face {font-family: "KP Inter";font-style: normal;font-display: swap;font-weight: 100 900;src: url(https://cdn.jsdelivr.net/npm/@fontsource-variable/inter@5.2.8/files/inter-latin-wght-normal.woff2) format("woff2");unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;}',
             '@font-face {font-family: "KP Inter";font-style: normal;font-display: swap;font-weight: 100 900;src: url(https://cdn.jsdelivr.net/npm/@fontsource-variable/inter@5.2.8/files/inter-cyrillic-wght-normal.woff2) format("woff2");unicode-range: U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116;}',
             'html body,body button,body input,body select,body textarea{font-family:-apple-system,BlinkMacSystemFont,"KP Inter",system-ui,Arial,sans-serif}',
             '.full-start-new .full-start-new__head{font-size:1em;font-weight:500;color:rgba(255,255,255,.72);letter-spacing:.01em}',
             '.full-start-new .full-start-new__head>span{color:inherit}',
+            '.full-start-new__head>.full-start__pg,.full-start-new__head>.full-start__status{display:inline-block;vertical-align:.08em;margin-left:.18em;padding:.08em .34em;border:1px solid currentColor;border-radius:.12em;background:transparent;color:inherit;font-size:.8em;font-weight:600;line-height:1.08;white-space:nowrap}',
+            '@media(min-width:481px){.full-start-new .full-start-new__body{align-items:stretch}.full-start-new__body>.full-start-new__left{display:flex;flex-direction:column}.full-start-new__left>.full-start-new__poster{flex:1 0 auto}.full-start-new__body>.full-start-new__right{display:flex;flex-direction:column}.full-start-new .full-start-new__right>.full-start-new__rate-line,.full-start-new .full-start-new__right>.full-start-new__buttons{margin-top:auto}}',
             '.full-start-new .full-start-new__title{font-weight:700}',
-            '.full-start-new .full-start-new__tagline{font-weight:500}',
+            '.full-start-new .full-start-new__tagline{font-weight:400}',
             '.full-start-new .full-start-new__rate-line{font-size:1em}',
-            detailTags.join(',') + ',.kp-home-cards .card__vote.kp-home-score,.kp-home-cards .card .card__quality{box-sizing:border-box;min-height:2.36em;min-width:2.36em;padding:.35em .8em;border:0;border-radius:5em;background:rgba(0,0,0,.35);color:#fff;font-size:1.1em;font-weight:600;line-height:1.2;font-variant-numeric:tabular-nums;align-items:center;justify-content:center}',
+            detailTags.join(',') + ',' + posterTags + '{box-sizing:border-box;min-height:2.1em;min-width:2.1em;padding:.27em .74em;border:0;border-radius:5em;background:rgba(0,0,0,.35);color:#fff;font-size:1em;font-weight:500;line-height:1.2;font-variant-numeric:tabular-nums;align-items:center;justify-content:center}',
             detailTags.map(function (sel) { return sel + ':not(.hide)'; }).join(',') + '{display:inline-flex;flex:0 0 auto}',
-            '.kp-home-cards .card__vote.kp-home-score,.kp-home-cards .card .card__quality{display:inline-flex;bottom:.35em;z-index:2}.kp-home-cards .card .card__quality{left:.35em;right:auto}.kp-home-cards .card__vote.kp-home-score{right:.35em;left:auto}',
+            posterTags + '{display:inline-flex;min-height:1.95em;min-width:1.95em;font-size:.92em;padding:.22em .63em;font-weight:600;z-index:2}',
+            '.kp-home-cards .card .card__type{top:.4em;left:.4em;right:auto;bottom:auto}.kp-home-cards .card .card__quality{bottom:.4em;left:.4em;right:auto}.kp-home-cards .card .card__vote.kp-home-score{bottom:.4em;right:.4em;left:auto}',
             '.full-start__rate-line>.full-start__rate>div,.full-start-new__rate-line>.full-start__rate>div{flex:0 0 auto;width:auto;height:auto;background:transparent;padding:0;font:inherit;color:inherit}',
             '.full-start__rate-line>.full-start__rate>div+div,.full-start-new__rate-line>.full-start__rate>div+div{margin-left:.4em}',
             '.card__title,.items-line__title,.settings__title,.modal__title,.selectbox__title{font-weight:600;letter-spacing:-.012em}',
             '.full-start-new .full-start-new__right{min-width:0}',
-            '.full-start-new .full-start-new__head{line-height:1.3;margin-bottom:.3em}',
+            '.full-start-new .full-start-new__head{line-height:1.4;margin-bottom:.7em}',
             '.full-start-new .full-start-new__title{line-height:1.12;letter-spacing:-.018em;margin-bottom:.16em}',
-            '.full-start-new .full-start-new__tagline{font-size:1.35em;line-height:1.35;max-width:40em;margin:0 0 .75em}',
+            '.full-start-new .full-start-new__tagline{font-size:1.35em;line-height:1.35;max-width:40em;margin:0 0 .85em;color:rgba(255,255,255,.88)}',
             '.full-start-new .full-start-new__rate-line{flex-wrap:wrap;padding-top:0;margin:0 0 .8em}',
             '.full-start-new .full-start-new__rate-line>*{margin:0 .65em .3em 0!important;white-space:nowrap}',
             '.full-start-new .full-start-new__details{line-height:1.35;min-height:0;margin:-.22em -.35em .85em}',
@@ -1062,10 +1090,10 @@
             '.full-start-new__rate-line>.rate--imdb,.full-start__rate-line>.rate--imdb{order:-3}',
             '.full-start-new__rate-line>.rate--tmdb,.full-start__rate-line>.rate--tmdb{order:-2}',
             '.full-start-new__rate-line>.rate--critics,.full-start__rate-line>.rate--critics{order:-1}',
-            '.kp-preview-layer{overflow:hidden;pointer-events:none;opacity:0;transition:opacity .55s ease}',
-            '.kp-preview-screen{position:absolute;top:0;bottom:0;left:0;right:0}',
-            '.kp-preview-layer.is-playing{opacity:1}.kp-preview-layer.is-playing+img.full-start__background{opacity:0}',
-            '.kp-preview-layer video{display:block;width:100%;height:100%;object-fit:cover}',
+            '.kp-preview-layer{position:fixed;top:0;right:0;bottom:0;left:0;overflow:hidden;-webkit-mask-image:linear-gradient(to bottom,#000 0%,#000 55%,transparent 100%);mask-image:linear-gradient(to bottom,#000 0%,#000 55%,transparent 100%);pointer-events:none;opacity:0;transition:opacity .55s ease}',
+            '.kp-preview-local{z-index:-1}',
+            '.kp-preview-layer.is-playing{opacity:1}img.full-start__background.kp-preview-hidden{opacity:0}',
+            '.kp-preview-layer video{display:block;width:100%;height:100%;object-fit:cover;transform:scale(1.24)}',
             '.kp-preview-layer:after{content:"";position:absolute;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.24)}',
             '.card__view>.card__marker--viewed,.full-start-new__poster>.card__marker--viewed,.full-start__poster>.card__marker--viewed,.kp-watched-overlay{position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;box-sizing:border-box;padding:0;border-radius:1em;background:rgba(0,0,0,.42);z-index:1;pointer-events:none}',
             '.card__marker.card__marker--viewed:before,.kp-watched-overlay:before{content:"";display:block;width:1.95em;height:1.95em;width:var(--kp-check-width,1.95em);height:var(--kp-check-height,1.95em);margin:0;border:0;border-radius:0;background:transparent center/contain no-repeat url("data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 28 29%27 fill=%27none%27 stroke=%27white%27 stroke-width=%272.7%27%3E%3Ccircle cx=%2714%27 cy=%2714.5%27 r=%2713%27/%3E%3Cpath d=%27m8 14.5 4 4 8-8%27 stroke-linecap=%27round%27 stroke-linejoin=%27round%27/%3E%3C/svg%3E")}',
