@@ -267,7 +267,23 @@
         content(row, Number(params.page) || 1, done);
     };
     app.Api.sources[source] = catalog;
-    rows.forEach(function (row, index) {
+    // Lampa uses the same visibility setting for home and categories.
+    // Override that one lookup only while it synchronously assembles the home screen.
+    var collectRows = app.ContentRows.call;
+    if (collectRows) app.ContentRows.call = function (screen) {
+        if (screen !== 'main') return collectRows.apply(this, arguments);
+        var get = app.Storage.get;
+        app.Storage.get = function (key) {
+            if (key === 'content_rows_recomend_watch') return false;
+            return get.apply(this, arguments);
+        };
+        try { return collectRows.apply(this, arguments); }
+        finally { app.Storage.get = get; }
+    };
+
+    var homeOrder = ['watchlist', 'discover', 'pick', 'history'];
+    homeOrder.forEach(function (id, index) {
+        var row = rows.find(function (entry) { return entry.id === id; });
         app.ContentRows.add({name: 'kp_profile_' + row.id, title: row.title, screen: 'main', index: index,
             call: function () { return function (done) { content(row, 1, done, true); }; }});
     });
@@ -548,6 +564,56 @@
         return String(app.Storage.get(name, false)) === 'true';
     }
 
+    var viewedJob = false;
+    function viewedEnabled() {
+        return String(app.Storage.get('kp_personal_viewed', true)) === 'true';
+    }
+    function viewedLedgerKey(p) {
+        var permit = app.Account && app.Account.Permit;
+        var account = permit && permit.account;
+        var target = permit && permit.sync ? account && account.profile && account.profile.id : 'local';
+        return target ? 'kp_personal_viewed_v1_' + p.profile + '_' + target : '';
+    }
+    function importViewed(p) {
+        if (!p || !app.Favorite || viewedJob || document.hidden || !viewedEnabled()) return;
+        var key = viewedLedgerKey(p);
+        if (!key) return;
+        var ledger = app.Storage.get(key, {});
+        var now = Date.now();
+        var queue = p.history.filter(function (entry) {
+            return ledger[entry.kp] !== 'done' && !(ledger[entry.kp] > now);
+        });
+        function active() {
+            return !document.hidden && viewedEnabled() && key === viewedLedgerKey(p) && snapshot === p;
+        }
+        function next() {
+            if (!active() || !queue.length) { viewedJob = false; return; }
+            var entry = queue.shift();
+            resolveMovie(entry).then(function (movie) {
+                if (!active()) return;
+                var retry = Date.now() + 86400000;
+                if (movie) {
+                    var marks = app.Favorite.check(movie);
+                    // Keep an explicit Lampa status such as "watching" or "dropped".
+                    if (!marks.viewed && !marks.look && !marks.continued && !marks.scheduled && !marks.thrown) {
+                        movie.source = 'tmdb';
+                        movie.kinopoisk_id = entry.kp;
+                        app.Favorite.add('viewed', movie);
+                        marks = app.Favorite.check(movie);
+                        retry = Date.now() + 600000;
+                    }
+                    if (marks.viewed) retry = 'done';
+                }
+                ledger[entry.kp] = retry;
+                app.Storage.set(key, ledger);
+            }).catch(function () {
+                ledger[entry.kp] = Date.now() + 600000;
+            }).then(function () { window.setTimeout(next, 1500); });
+        }
+        viewedJob = true;
+        next();
+    }
+
     var futureJob = false, futureChecked = '';
     function importFuture(p) {
         if (!p || !enabled('kp_personal_future') || futureJob) return;
@@ -581,8 +647,8 @@
         next();
     }
 
-    function setting(name, label, description, change) {
-        app.SettingsApi.addParam({component: source, param: {name: name, type: 'trigger', default: false},
+    function setting(name, label, description, change, defaultValue) {
+        app.SettingsApi.addParam({component: source, param: {name: name, type: 'trigger', default: !!defaultValue},
             field: {name: label, description: description}, onChange: change || function () {}});
     }
 
@@ -590,6 +656,7 @@
         if (document.hidden || !endpoint()) return;
         profile().then(function (p) {
             if (!p || document.hidden) return;
+            importViewed(p);
             importFuture(p);
             if (scoreView) scoreView(p);
             if (homeVersion === null || homeVersion === p.updated || Date.now() - lastInput < 10000) return;
@@ -607,6 +674,11 @@
     window.setInterval(refreshVisible, pollMs);
     document.addEventListener('visibilitychange', refreshVisible);
     app.SettingsApi.addComponent({component: source, name: 'Мой Кинопоиск', icon: kpIcon});
+    setting('kp_personal_viewed', 'Просмотрено из Кинопоиска', 'В фоне отмечать в Lampa оценённые и просмотренные тайтлы из КП. У сериала отмечается только карточка целиком.', function () {
+        if (viewedEnabled()) profile().then(importViewed);
+    }, true);
+    if (window.appready) profile().then(importViewed);
+    else app.Listener.follow('app', function (e) { if (e.type === 'ready') profile().then(importViewed); });
     setting('kp_personal_future', 'Будущие релизы в «Позже»', 'Добавлять из «Буду смотреть» фильмы и сериалы с предстоящей датой выхода в TMDB.', function () {
         if (enabled('kp_personal_future')) profile().then(importFuture);
     });
