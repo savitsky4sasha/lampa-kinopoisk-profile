@@ -696,6 +696,12 @@
         else trailer.appendTo(sources);
     }
 
+    function seenMovie(movie, profileData, entry, vote) {
+        if (vote || (profileData && entry && profileData.history.indexOf(entry) >= 0)) return true;
+        if (movie.source === source || !app.Favorite || !app.Favorite.check) return false;
+        var marks = app.Favorite.check(movie);
+        return !!(marks && marks.viewed);
+    }
     function watchedPoster(poster, seen) {
         var overlay = poster.querySelector('.kp-watched-overlay');
         poster.classList.toggle('kp-profile-seen', seen);
@@ -869,7 +875,6 @@
             var label = score === 10 ? '10' : score.toFixed(1);
             if (badge.textContent !== label) badge.textContent = label;
             badge.title = audience ? 'Рейтинг Кинопоиска' : imdb ? 'Рейтинг IMDb' : 'Рейтинг TMDB';
-            badge.setAttribute('data-tone', score >= 7 ? 'good' : score >= 5 ? 'average' : 'low');
         }
         var needsImdb = !audience && !imdb && (!cached || cached.until <= Date.now());
         node.classList.toggle('kp-needs-imdb', needsImdb);
@@ -886,10 +891,8 @@
             mine.textContent = String(personal);
             mine.title = 'Моя оценка на КП: ' + personal;
         } else if (mine) mine.remove();
-        var watched = personal || (snapshot && entry && snapshot.history.indexOf(entry) >= 0);
-        if (!watched && movie.source !== source && app.Favorite && app.Favorite.check)
-            watched = app.Favorite.check(movie).viewed;
-        watchedPoster(poster, !!watched);
+        node.classList.toggle('kp-poster-rated', !!personal);
+        watchedPoster(poster, seenMovie(movie, snapshot, entry, personal));
     }
     function drawHome() {
         if (!homePage) return;
@@ -1473,8 +1476,8 @@
             '.card__marker--viewed>span{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}',
             '.kp-profile-seen>.card__marker--viewed{display:none}.card__view>.card__vote,.card__view>.card__icons{z-index:2}',
             '.kp-home-cards .kp-no-score .card__vote,.kp-profile-seen .card__icon.icon--history{display:none}',
-            '.kp-home-cards .card__vote.kp-home-score{position:absolute;top:auto;color:#fff}.kp-home-score[data-tone=good]{background:#258448!important}.kp-home-score[data-tone=average]{background:#57585d!important}.kp-home-score[data-tone=low]{background:#ad393d!important}',
-            '.kp-poster-personal{position:absolute;top:.45em;right:.45em;z-index:3;box-sizing:border-box;width:1.9em;height:1.9em;display:flex;align-items:center;justify-content:center;border-radius:50%;border:2px solid #9dcfa8;background:#225a32;color:#fff;font-weight:600}',
+            '.kp-home-cards .card .card__vote.kp-home-score{position:absolute;top:auto;background:rgba(0,0,0,.35);color:#fff}.kp-home-cards .card.kp-poster-rated .card__quality{top:.4em;right:.4em;left:auto;bottom:auto}',
+            '.kp-poster-personal{position:absolute;bottom:.4em;left:.4em;z-index:3;box-sizing:border-box;min-width:1.95em;height:1.95em;padding:0 .38em;display:inline-flex;align-items:center;justify-content:center;border-radius:5em;background:#278543;color:#fff;font-size:.92em;font-weight:600;line-height:1.2;font-variant-numeric:tabular-nums}.full-start-new__poster.kp-profile-seen,.full-start__poster.kp-profile-seen{position:relative}',
             '.kp-row-description{font-size:1em;font-weight:400;line-height:1.35;opacity:.72;margin:.25em 0 1em}',
             '.items-line__head+.kp-row-description{margin-left:1.5em;margin-right:1.5em}',
             '.kp-row-description.kp-grid-description{margin:0 1.5em 1em}',
@@ -1579,6 +1582,8 @@
                 }
             }
             var value = currentVote(movie.kinopoisk_id || (k && k.kp), k);
+            var fullPoster = hero.querySelector('.full-start-new__poster, .full-start__poster');
+            if (fullPoster) watchedPoster(fullPoster, seenMovie(movie, p, k, value));
             badge.text(value ? String(value) : '+');
             if (value) badge.attr('data-voted', 'true');
             else badge.removeAttr('data-voted');
