@@ -77,16 +77,24 @@
     function get(method, query) {
         return new Promise(function (resolve, reject) { tmdb.get(method, query, resolve, reject); });
     }
+    var resolvedMovies = {};
     function resolveMovie(k) {
+        var key = [k.kind, k.kp, k.year, k.original || k.title, app.Storage.get('language', '')].join('|');
+        if (resolvedMovies[key]) return resolvedMovies[key].then(copyMovie);
+        function copyMovie(movie) { return movie && Object.assign({}, movie); }
         function search(name) {
             return get('search/' + k.kind, {query: encodeURIComponent(name)}).then(function (data) {
                 var exact = (data.results || []).filter(function (m) { return matches(k, m); });
                 return exact.length === 1 ? exact[0] : null;
             });
         }
-        return search(k.original || k.title).then(function (m) {
+        resolvedMovies[key] = search(k.original || k.title).then(function (m) {
             return m || (!k.original || k.original === k.title ? null : search(k.title));
-        });
+        }).then(function (movie) {
+            if (!movie) delete resolvedMovies[key];
+            return movie;
+        }, function (err) { delete resolvedMovies[key]; throw err; });
+        return resolvedMovies[key].then(copyMovie);
     }
     function card(k) {
         var item = {id: k.kp, kinopoisk_id: k.kp, source: source, title: k.title,
@@ -408,13 +416,36 @@
     if (window.appready) installProfileMenu();
     else app.Listener.follow('app', function (e) { if (e.type === 'ready') installProfileMenu(); });
 
+    var indexedProfile, entriesById, entriesByName;
     function movieEntry(movie, p) {
         if (!p) return null;
-        var items = p.history.concat(p.watchlist);
-        if (movie.kinopoisk_id) return items.find(function (k) { return String(k.kp) === String(movie.kinopoisk_id); });
-        var hits = items.filter(function (k) { return matches(k, movie); });
-        if (hits.length && hits.every(function (k) { return k.kp === hits[0].kp; })) return hits[0];
-        return null;
+        if (p !== indexedProfile) {
+            indexedProfile = p;
+            entriesById = Object.create(null);
+            entriesByName = Object.create(null);
+            p.history.concat(p.watchlist).forEach(function (entry) {
+                if (!entriesById[entry.kp]) entriesById[entry.kp] = entry;
+                candidates(entry).forEach(function (name) {
+                    var key = [entry.kind, entry.year, name].join('|');
+                    if (!(key in entriesByName)) entriesByName[key] = entry;
+                    else if (entriesByName[key] && entriesByName[key].kp !== entry.kp) entriesByName[key] = null;
+                });
+            });
+        }
+        if (movie.kinopoisk_id) return entriesById[movie.kinopoisk_id] || null;
+        var kind = movie.original_name || movie.name ? 'tv' : 'movie';
+        var year = String(movie.release_date || movie.first_air_date || '').slice(0, 4);
+        var names = [movie.title, movie.name, movie.original_title, movie.original_name];
+        var found;
+        for (var i = 0; i < names.length; i++) {
+            if (!names[i]) continue;
+            var key = [kind, year, norm(names[i])].join('|');
+            if (!(key in entriesByName)) continue;
+            var match = entriesByName[key];
+            if (!match || (found && found.kp !== match.kp)) return null;
+            found = match;
+        }
+        return found || null;
     }
 
     function goToKP(url) {
@@ -687,6 +718,53 @@
     };
     var homePage = null, homeObserver, homeProfile, homeMatches = {}, homeTimer;
     var posterObserver, posterQueue = [], posterRunning = 0, posterRatings = {};
+    var filmRatings = app.Storage.get('kp_film_public_ratings_v1', {}) || {};
+    function filmKey(movie) {
+        return [movie.name || movie.original_name ? 'tv' : 'movie',
+            norm(movie.original_title || movie.original_name || movie.title || movie.name),
+            String(movie.release_date || movie.first_air_date || '').slice(0, 4)].join('/');
+    }
+    function cachedFilmRating(movie) { return filmRatings[filmKey(movie)] || {}; }
+    function rememberFilmRating(movie, sourceName, score) {
+        var key = filmKey(movie);
+        if (!key || !key.split('/')[1] || !key.split('/')[2]) return;
+        var row = filmRatings[key] || (filmRatings[key] = {});
+        if (JSON.stringify(row[sourceName]) === JSON.stringify(score)) return;
+        row[sourceName] = score;
+        row.updated = Date.now();
+        var keys = Object.keys(filmRatings);
+        if (keys.length > 200) {
+            keys.sort(function (a, b) { return filmRatings[a].updated - filmRatings[b].updated; });
+            delete filmRatings[keys[0]];
+        }
+        try { app.Storage.set('kp_film_public_ratings_v1', filmRatings); } catch (ignore) {}
+    }
+    function directCritics(movie) {
+        var title = movie.original_title || movie.title || '';
+        var year = String(movie.release_date || '').slice(0, 4);
+        var slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+        if (!slug || !/^\d{4}$/.test(year)) return Promise.resolve(null);
+        return new Promise(function (done) {
+            function parse(html) {
+                try {
+                    var json = /<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/i.exec(html);
+                    var panel = /<script[^>]*id="media-scorecard-json"[^>]*>([\s\S]*?)<\/script>/i.exec(html);
+                    if (!json || !panel) return done(null);
+                    var film = JSON.parse(json[1]), critics = JSON.parse(panel[1]).criticsScore;
+                    if (film['@type'] !== 'Movie' || norm(film.name) !== norm(title) ||
+                        String(film.dateCreated).slice(0, 4) !== year || !critics || !critics.reviewCount ||
+                        !/^(100|[0-9]{1,2})%$/.test(critics.scorePercent)) return done(null);
+                    done({value: critics.scorePercent, date: new Date().toISOString().slice(0, 10), checked: Date.now()});
+                } catch (ignore) { done(null); }
+            }
+            var url = 'https://www.rottentomatoes.com/m/' + slug;
+            if (app.Reguest) {
+                var request = new app.Reguest();
+                request.timeout(6500);
+                request.native(url, parse, function () { done(null); }, false, {dataType: 'text'});
+            } else $.ajax({url: url, dataType: 'text', timeout: 6500}).done(parse).fail(function () { done(null); });
+        });
+    }
     function imdbId(movie) {
         var existing = movie.imdb_id || (movie.external_ids && movie.external_ids.imdb_id);
         if (/^tt\d+$/.test(existing || '')) return Promise.resolve(existing);
@@ -736,7 +814,7 @@
     function loadPosterScores() {
         while (posterRunning < 3 && posterQueue.length) {
             var node = posterQueue.shift();
-            if (!homePage || !homePage.root.contains(node) || !node.classList.contains('kp-no-score')) continue;
+            if (!homePage || !homePage.root.contains(node) || !node.classList.contains('kp-needs-imdb')) continue;
             var movie = node.card_data, key = posterKey(movie);
             if (posterRatings[key] && posterRatings[key].until > Date.now()) continue;
             posterRunning++;
@@ -772,7 +850,11 @@
         var kpId = movie.kinopoisk_id || (entry && entry.kp);
         var imported = snapshot && snapshot.imdbByKp && snapshot.imdbByKp[kpId];
         var imdb = Number(movie.imdb_rating) || Number(movie.ratingImdb) || Number(imported) || (cached && cached.value);
-        var score = personal || audience || imdb;
+        var saved = cachedFilmRating(movie);
+        audience = audience || Number(saved.kp);
+        imdb = imdb || Number(saved.imdb);
+        var tmdbScore = Number(movie.vote_average);
+        var score = audience || imdb || tmdbScore;
         var badge = poster.querySelector('.card__vote');
         var hasScore = score > 0 && score <= 10;
         node.classList.toggle('kp-no-score', !hasScore);
@@ -784,15 +866,30 @@
             }
             badge.classList.remove('hide');
             badge.classList.add('kp-home-score');
-            var label = (personal || score === 10) ? String(score) : score.toFixed(1);
+            var label = score === 10 ? '10' : score.toFixed(1);
             if (badge.textContent !== label) badge.textContent = label;
-            badge.title = personal ? 'Моя оценка на Кинопоиске' : audience ? 'Рейтинг зрителей Кинопоиска' : 'Рейтинг IMDb';
-            badge.classList.toggle('kp-mine', !!personal);
-        } else if ((!cached || cached.until <= Date.now()) && (tmdb.external_imdb_id || tmdb.get || movie.imdb_id || (movie.external_ids && movie.external_ids.imdb_id))) {
-            if (posterObserver) posterObserver.observe(node);
-            else queuePoster(node);
+            badge.title = audience ? 'Рейтинг Кинопоиска' : imdb ? 'Рейтинг IMDb' : 'Рейтинг TMDB';
+            badge.setAttribute('data-tone', score >= 7 ? 'good' : score >= 5 ? 'average' : 'low');
         }
-        watchedPoster(poster, !!personal || !!(snapshot && entry && snapshot.history.indexOf(entry) >= 0));
+        var needsImdb = !audience && !imdb && (!cached || cached.until <= Date.now());
+        node.classList.toggle('kp-needs-imdb', needsImdb);
+        if (needsImdb) {
+            if (posterObserver) posterObserver.observe(node); else queuePoster(node);
+        }
+        var mine = poster.querySelector('.kp-poster-personal');
+        if (personal) {
+            if (!mine) {
+                mine = document.createElement('span');
+                mine.className = 'kp-poster-personal';
+                poster.appendChild(mine);
+            }
+            mine.textContent = String(personal);
+            mine.title = 'Моя оценка на КП: ' + personal;
+        } else if (mine) mine.remove();
+        var watched = personal || (snapshot && entry && snapshot.history.indexOf(entry) >= 0);
+        if (!watched && movie.source !== source && app.Favorite && app.Favorite.check)
+            watched = app.Favorite.check(movie).viewed;
+        watchedPoster(poster, !!watched);
     }
     function drawHome() {
         if (!homePage) return;
@@ -837,7 +934,7 @@
         var row = e.component === 'category_full' && e.object.source === source &&
             rows.find(function (r) { return r.id === e.object.url || r.title === e.object.title; });
         if (e.component !== 'main' && e.component !== 'kp_personal_tab' && e.component !== 'recomend' &&
-            e.component !== 'category' && e.component !== 'category_full') return;
+            e.component !== 'favorite' && e.component !== 'history' && e.component !== 'category' && e.component !== 'category_full') return;
         homePage = {root: root, row: row, tab: e.component === 'kp_personal_tab' || e.object.source === source};
         root.classList.add('kp-home-cards');
         if (window.IntersectionObserver) posterObserver = new window.IntersectionObserver(function (entries) {
@@ -860,6 +957,11 @@
         profile().then(scheduleHome);
     }
 
+    function observeCurrentHome() {
+        var active = app.Activity && app.Activity.active && app.Activity.active();
+        if (!homePage && active && active.activity) homeActivity({type: 'start', component: active.component, object: active});
+    }
+    window.setTimeout(observeCurrentHome, 0);
     var activePreview = null;
     function stopPreview() {
         if (!activePreview) return;
@@ -1232,31 +1334,51 @@
             var number = parseFloat(value);
             var field = root.querySelector('.rate--' + type);
             if (!field || !field.firstElementChild || !(number > 0 && number <= 10)) return;
+            rememberFilmRating(movie, type, number);
             field.firstElementChild.textContent = number.toFixed(1);
             if (type === 'kp' && field.children[1]) field.children[1].textContent = 'КП';
             field.classList.remove('hide');
         }
         var kind = movie.name || movie.original_name ? 'tv' : 'movie';
+        var renderToken = {};
+        root.kpRatingToken = renderToken;
+        function ratingCurrent() { return root.kpRatingToken === renderToken && document.documentElement.contains(root); }
         if (Number(movie.imdb_rating) > 0) showRating('imdb', movie.imdb_rating);
         var oldCritics = root.querySelector('.rate--critics');
         if (oldCritics) oldCritics.remove();
-        imdbId(movie).then(function (id) {
-            loadKinoPubQuality(movie, id, current, specs);
-            if (!/^tt[0-9]+$/.test(id) || !current()) return;
-            if (!Number(movie.imdb_rating)) imdbScore(id, kind === 'tv' ? 'series' : 'movie').then(function (score) {
-                if (current()) showRating('imdb', score);
-            });
-            criticScore(id).then(function (score) {
-                var tmdbField = root.querySelector('.rate--tmdb');
-                if (!current() || !score || !tmdbField || tmdbField.children.length < 2) return;
-                var field = tmdbField.cloneNode(true);
+        function showCritics(score) {
+            var tmdbField = root.querySelector('.rate--tmdb');
+            if (!ratingCurrent() || !score || !tmdbField || tmdbField.children.length < 2) return;
+            var field = root.querySelector('.rate--critics');
+            if (!field) {
+                field = tmdbField.cloneNode(true);
                 field.classList.remove('rate--tmdb', 'hide');
                 field.classList.add('rate--critics');
-                field.children[0].textContent = score.value;
                 field.children[1].classList.remove('source--name');
                 field.children[1].textContent = 'Критики';
-                field.title = 'Rotten Tomatoes · доля положительных рецензий' + (score.date ? ' · ' + score.date : '');
                 tmdbField.parentNode.insertBefore(field, tmdbField.nextSibling);
+            }
+            rememberFilmRating(movie, 'critics', score);
+            field.children[0].textContent = score.value;
+            field.title = 'Rotten Tomatoes · доля положительных рецензий' + (score.date ? ' · ' + score.date : '');
+        }
+        var saved = cachedFilmRating(movie);
+        if (saved.imdb) showRating('imdb', saved.imdb);
+        if (saved.kp) showRating('kp', saved.kp);
+        if (saved.critics) showCritics(saved.critics);
+        if (kind === 'movie' && (!saved.critics || !saved.critics.checked || Date.now() - saved.critics.checked > 86400000)) {
+            directCritics(movie).then(function (score) {
+                if (score && ratingCurrent()) showCritics(score);
+            });
+        }
+        imdbId(movie).then(function (id) {
+            loadKinoPubQuality(movie, id, ratingCurrent, specs);
+            if (!/^tt[0-9]+$/.test(id) || !ratingCurrent()) return;
+            if (!Number(movie.imdb_rating)) imdbScore(id, kind === 'tv' ? 'series' : 'movie').then(function (score) {
+                if (ratingCurrent()) showRating('imdb', score);
+            });
+            criticScore(id).then(function (score) {
+                if (!root.querySelector('.rate--critics')) showCritics(score);
             });
         }).catch(function () {});
 
@@ -1300,26 +1422,26 @@
             } else { video.src = url; play(); }
         }
         profile().then(function (p) {
-            if (!current()) return;
+            if (!ratingCurrent()) return;
             var entry = movieEntry(movie, p);
             var audience = Number(movie.kp_rating) || (entry && entry.kpAudience);
             showRating('kp', audience);
             function useId(id) {
-                if (!id || !current()) return;
+                if (!id || !ratingCurrent()) return;
                 resolvedIds[kind + '/' + movie.id] = id;
-                if (!audience && app.Reguest) {
+                if ((!audience || !Number(movie.imdb_rating)) && app.Reguest) {
                     var request = new app.Reguest();
                     request.timeout(4500);
                     request.native('https://rating.kinopoisk.ru/' + id + '.xml', function (xml) {
                         var data = typeof xml === 'string' ? new DOMParser().parseFromString(xml, 'text/xml') : xml;
-                        if (!current() || !data || !data.querySelector) return;
+                        if (!ratingCurrent() || !data || !data.querySelector) return;
                         ['kp', 'imdb'].forEach(function (name) {
                             var node = data.querySelector(name + '_rating');
                             if (node) showRating(name, node.textContent);
                         });
                     }, function () {}, false, {dataType: 'text'});
                 }
-                if (String(app.Storage.get('kp_personal_backdrop', true)) !== 'true' || document.hidden ||
+                if (!current() || String(app.Storage.get('kp_personal_backdrop', true)) !== 'true' || document.hidden ||
                     (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches)) return;
                 preview.timer = window.setTimeout(function () {
                     if (!current()) return;
@@ -1351,7 +1473,9 @@
             '.card__marker--viewed>span{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}',
             '.kp-profile-seen>.card__marker--viewed{display:none}.card__view>.card__vote,.card__view>.card__icons{z-index:2}',
             '.kp-home-cards .kp-no-score .card__vote,.kp-profile-seen .card__icon.icon--history{display:none}',
-            '.kp-home-cards .card__view>.card__vote.kp-mine{background-color:#278543!important}.kp-row-description{font-size:1em;font-weight:400;line-height:1.35;opacity:.72;margin:.25em 0 1em}',
+            '.kp-home-cards .card__vote.kp-home-score{position:absolute;top:auto;color:#fff}.kp-home-score[data-tone=good]{background:#258448!important}.kp-home-score[data-tone=average]{background:#57585d!important}.kp-home-score[data-tone=low]{background:#ad393d!important}',
+            '.kp-poster-personal{position:absolute;top:.45em;right:.45em;z-index:3;box-sizing:border-box;width:1.9em;height:1.9em;display:flex;align-items:center;justify-content:center;border-radius:50%;border:2px solid #9dcfa8;background:#225a32;color:#fff;font-weight:600}',
+            '.kp-row-description{font-size:1em;font-weight:400;line-height:1.35;opacity:.72;margin:.25em 0 1em}',
             '.items-line__head+.kp-row-description{margin-left:1.5em;margin-right:1.5em}',
             '.kp-row-description.kp-grid-description{margin:0 1.5em 1em}',
             '.kp-cinema,.kp-cinema-screen{font-family:SegoeUI,sans-serif}.kp-cinema{transition:opacity .3s,transform .3s}.kp-cinema .full-start-new__body{height:80vh;display:flex;align-items:flex-end}.kp-cinema .full-start-new__left,.kp-cinema .full-start-new__tagline,.kp-cinema .full-start__rate{display:none}.kp-cinema .full-start-new__right{display:flex;width:100%;min-width:0;align-items:flex-end;margin:0;padding:0;background:none;overflow:visible}.kp-cinema-info{flex:1;min-width:0}.kp-cinema .full-start-new__title{text-shadow:0 0 .1em rgba(0,0,0,.3)}',
